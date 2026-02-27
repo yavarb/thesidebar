@@ -98,6 +98,7 @@ const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) =>
 // Prompt queue
 type PromptEntry = { id: number; text: string; model?: string; context?: string; timestamp: number; clientId?: string };
 const promptQueue: PromptEntry[] = [];
+let currentAbortController: AbortController | null = null;
 const promptLog = new Map<number, PromptEntry>();
 let promptId = 0;
 const promptWaiters: { resolve: (v: any) => void; timer: NodeJS.Timeout }[] = [];
@@ -178,6 +179,8 @@ const TOOL_PROGRESS: Record<string, (args: any) => string> = {
 };
 
 async function processPrompt(entry: PromptEntry, ws: any) {
+  const abortController = new AbortController();
+  currentAbortController = abortController;
   try {
     // Get document context (from cache if fresh)
     let documentContext = "";
@@ -359,6 +362,9 @@ To use a tool, make an HTTP request to http://localhost:3001/api/<endpoint>. Do 
         if (oldest !== undefined) exchangeUndoCounts.delete(oldest);
       }
     }
+
+    // Clear abort controller
+    if (currentAbortController === abortController) currentAbortController = null;
 
     // Send final response
     if (ws.readyState === 1) {
@@ -574,6 +580,21 @@ app.get("/api/prompts/wait", (req, res) => {
   const timer = setTimeout(() => { if (!done) { done = true; const idx = promptWaiters.findIndex(w => w.resolve === resolve); if (idx >= 0) promptWaiters.splice(idx, 1); res.json({ ok: true, data: null }); }}, timeoutMs);
   promptWaiters.push({ resolve, timer });
 });
+app.post("/api/prompts/abort", (_req, res) => {
+  if (currentAbortController) {
+    currentAbortController.abort();
+    currentAbortController = null;
+    // Also clear queue
+    const c = promptQueue.length;
+    promptQueue.length = 0;
+    res.json({ ok: true, data: { aborted: true, queueCleared: c } });
+  } else {
+    const c = promptQueue.length;
+    promptQueue.length = 0;
+    res.json({ ok: true, data: { aborted: false, queueCleared: c } });
+  }
+});
+
 app.delete("/api/prompts", (_req, res) => { const c = promptQueue.length; promptQueue.length = 0; res.json({ ok: true, data: { cleared: c }}); });
 
 // Ping

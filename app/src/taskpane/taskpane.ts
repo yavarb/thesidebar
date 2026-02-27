@@ -102,7 +102,22 @@ function addThinkingIndicator(): HTMLElement {
   const el = document.createElement("div");
   el.className = "chat-thinking";
   el.id = "thinking-indicator";
-  el.innerHTML = '<div class="thinking-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div><span class="thinking-elapsed"></span>';
+  el.innerHTML = '<div class="thinking-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div><span class="thinking-elapsed"></span><button class="thinking-stop" title="Cancel request">■</button>';
+  const stopBtn = el.querySelector(".thinking-stop") as HTMLButtonElement;
+  stopBtn.addEventListener("click", () => {
+    // Abort current request via server endpoint
+    fetch("http://localhost:3001/api/prompts/abort", { method: "POST" }).catch(() => {});
+    removeThinkingIndicator();
+    // Show cancelled message
+    const hist = document.getElementById("prompt-history");
+    if (hist) {
+      const cancelEl = document.createElement("div");
+      cancelEl.className = "chat-entry chat-assistant";
+      cancelEl.innerHTML = '<div class="chat-role">The Sidebar</div><div class="chat-text" style="opacity:0.5;font-style:italic">Request cancelled.</div>';
+      hist.appendChild(cancelEl);
+      hist.scrollTo({ top: hist.scrollHeight, behavior: "smooth" });
+    }
+  });
   history.appendChild(el);
   history.scrollTop = history.scrollHeight;
 
