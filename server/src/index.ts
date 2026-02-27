@@ -843,6 +843,35 @@ app.post("/api/references/query", async (req, res) => {
   }
 });
 
+// ── Custom Prompts Persistence ──
+const CUSTOM_PROMPTS_PATH = path.join(process.env.HOME || "~", ".thesidebar", "custom-prompts.json");
+
+app.get("/api/prompts/custom", (_req, res) => {
+  try {
+    if (fs.existsSync(CUSTOM_PROMPTS_PATH)) {
+      const data = JSON.parse(fs.readFileSync(CUSTOM_PROMPTS_PATH, "utf-8"));
+      res.json({ ok: true, data: Array.isArray(data) ? data : [] });
+    } else {
+      res.json({ ok: true, data: [] });
+    }
+  } catch (e: any) {
+    res.json({ ok: true, data: [] });
+  }
+});
+
+app.post("/api/prompts/custom", (req, res) => {
+  try {
+    const prompts = req.body;
+    if (!Array.isArray(prompts)) return res.status(400).json({ ok: false, error: "array required" });
+    const dir = path.dirname(CUSTOM_PROMPTS_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(CUSTOM_PROMPTS_PATH, JSON.stringify(prompts, null, 2));
+    res.json({ ok: true });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ── Section Read (by heading text or index range) ──
 app.get("/api/section", apiHandler("getSection", (req) => ({
   heading: req.query.heading as string,

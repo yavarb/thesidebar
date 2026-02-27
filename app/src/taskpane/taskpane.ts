@@ -151,6 +151,7 @@ Office.onReady((info) => {
     setupSettingsUI();
     setupTrackChangesToggle();
     setupRefStatus();
+    setupQuickActions();
     connectWebSocket();
     // Initialize document session after WebSocket connects
     setTimeout(() => initSession(), 1000);
@@ -1693,6 +1694,28 @@ function setupTrackChangesToggle(): void {
     localStorage.setItem("sidebar-track-changes", String(trackChangesMode));
   });
 
+  
+  // Tighten button — tightens selected text
+  const tightenBtn = document.getElementById("tighten-btn");
+  tightenBtn?.addEventListener("click", async () => {
+    const prompt = `Tighten the following selected text. Make it more concise without losing any substance, meaning, or persuasive force. Reduce word count significantly. Do not change the tone or weaken any arguments. Replace the selection with the tightened version.
+
+Rules:
+- Cut filler words, redundancies, and throat-clearing
+- Combine sentences where possible
+- Prefer active voice
+- Keep every substantive point
+- Maintain the same level of formality
+- Do not add new content`;
+    
+    const input = document.getElementById("prompt-input") as HTMLTextAreaElement;
+    if (input) {
+      input.value = prompt;
+      const sendBtn = document.getElementById("prompt-send") as HTMLButtonElement;
+      sendBtn?.click();
+    }
+  });
+
   // Restore on load
   const savedMode = localStorage.getItem("sidebar-track-changes");
   if (savedMode === "true") {
@@ -1720,4 +1743,406 @@ function setupTrackChangesToggle(): void {
       }).catch(() => {});
     }
   });
+}
+
+// ══════════════════════════════════════
+// QUICK ACTIONS
+// ══════════════════════════════════════
+
+interface QuickAction {
+  name: string;
+  prompt: string;
+}
+
+interface QuickActionCategory {
+  label: string;
+  actions: QuickAction[];
+}
+
+const QUICK_ACTIONS_DEFAULTS: QuickActionCategory[] = [
+  {
+    label: "📋 Cite",
+    actions: [
+      { name: "Check Bluebook", prompt: "Review all citations in this document for Bluebook formatting errors. List each error with the paragraph number, the incorrect citation, and the corrected version." },
+      { name: "Long/Short Cites", prompt: "Check that every short citation in this document has a corresponding full citation earlier in the document. Flag any short cites that don't match a prior long cite, and any long cites that are repeated unnecessarily." },
+      { name: "TOA Pages", prompt: "Review the Table of Authorities and verify that the page numbers are correct. List any discrepancies." },
+      { name: "Find Uncited", prompt: "Identify any factual assertions in this document that lack a supporting citation or footnote." },
+    ]
+  },
+  {
+    label: "📝 Format",
+    actions: [
+      { name: "Defined Terms", prompt: "Check all defined terms in this document for consistency. Verify that each term is defined before first use, that definitions match usage, and that capitalization is consistent." },
+      { name: "House Style", prompt: "Review this document for common style issues: Oxford comma consistency, 'shall' vs 'will' vs 'must', passive voice, legalese that could be simplified, and inconsistent formatting." },
+      { name: "Cross-References", prompt: "Check all internal cross-references (e.g., 'See Section 3.2', 'as defined in Article IV') and verify they point to the correct sections." },
+      { name: "Clean Up", prompt: "Clean up formatting issues: remove double spaces, fix inconsistent paragraph spacing, normalize quotation marks (smart quotes), and fix any broken numbering." },
+    ]
+  },
+  {
+    label: "🔍 Review",
+    actions: [
+      { name: "Summarize", prompt: "Provide a concise summary of this document, including: (1) the type of document, (2) the parties involved, (3) the key terms and obligations, and (4) any notable provisions or risks." },
+      { name: "Ambiguities", prompt: "Identify any ambiguous language in this document that could lead to disputes or multiple interpretations. For each instance, explain the ambiguity and suggest clearer language." },
+      { name: "Missing Definitions", prompt: "Find any terms in this document that are used as if they are defined terms (e.g., capitalized nouns) but lack a formal definition. List them with suggested definitions." },
+      { name: "Risk Analysis", prompt: "Analyze this document for potential legal risks, unfavorable terms, or provisions that may be problematic. Prioritize by severity." },
+    ]
+  },
+];
+
+function getBuiltinOverrides(): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem("sidebar-builtin-overrides") || "{}"); } catch { return {}; }
+}
+function saveBuiltinOverrides(overrides: Record<string, string>): void {
+  localStorage.setItem("sidebar-builtin-overrides", JSON.stringify(overrides));
+}
+
+function getCustomPrompts(): QuickAction[] {
+  try { return JSON.parse(localStorage.getItem("sidebar-custom-prompts") || "[]"); } catch { return []; }
+}
+function saveCustomPrompts(prompts: QuickAction[]): void {
+  localStorage.setItem("sidebar-custom-prompts", JSON.stringify(prompts));
+  // Also sync to server (best-effort)
+  fetch("http://localhost:3001/api/prompts/custom", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(prompts),
+  }).catch(() => {});
+}
+
+function getEffectivePrompt(actionName: string, defaultPrompt: string): string {
+  const overrides = getBuiltinOverrides();
+  return overrides[actionName] ?? defaultPrompt;
+}
+
+function getDefaultPrompt(actionName: string): string | null {
+  for (const cat of QUICK_ACTIONS_DEFAULTS) {
+    for (const a of cat.actions) {
+      if (a.name === actionName) return a.prompt;
+    }
+  }
+  return null;
+}
+
+function isBuiltinAction(actionName: string): boolean {
+  return getDefaultPrompt(actionName) !== null;
+}
+
+function isBuiltinModified(actionName: string): boolean {
+  const overrides = getBuiltinOverrides();
+  return actionName in overrides;
+}
+
+async function resolvePromptVariables(prompt: string): Promise<string> {
+  let resolved = prompt;
+  if (resolved.includes("{{selection}}")) {
+    try {
+      const sel = await Word.run(async (ctx) => {
+        const s = ctx.document.getSelection();
+        s.load("text");
+        await ctx.sync();
+        return s.text;
+      });
+      resolved = resolved.replace(/\{\{selection\}\}/g, sel || "(no text selected)");
+    } catch {
+      resolved = resolved.replace(/\{\{selection\}\}/g, "(unable to read selection)");
+    }
+  }
+  resolved = resolved.replace(/\{\{document\}\}/g, "[full document context included automatically]");
+  return resolved;
+}
+
+async function executeQuickAction(prompt: string): Promise<void> {
+  const resolved = await resolvePromptVariables(prompt);
+  const input = document.getElementById("prompt-input") as HTMLTextAreaElement;
+  if (input) {
+    input.value = resolved;
+    input.dispatchEvent(new Event("input")); // trigger auto-resize
+  }
+  const sendBtn = document.getElementById("prompt-send") as HTMLButtonElement;
+  if (sendBtn) sendBtn.click();
+}
+
+// ── Modal State ──
+let qaModalMode: "edit-builtin" | "edit-custom" | "add-custom" = "add-custom";
+let qaModalActionName: string | null = null;
+let qaModalCustomIndex: number = -1;
+
+function openPromptEditor(opts: {
+  mode: typeof qaModalMode;
+  name?: string;
+  prompt?: string;
+  defaultPrompt?: string;
+  customIndex?: number;
+}): void {
+  qaModalMode = opts.mode;
+  qaModalActionName = opts.name || null;
+  qaModalCustomIndex = opts.customIndex ?? -1;
+
+  const overlay = document.getElementById("qa-modal-overlay");
+  const titleEl = document.getElementById("qa-modal-title") as HTMLElement;
+  const nameInput = document.getElementById("qa-modal-name") as HTMLInputElement;
+  const promptInput = document.getElementById("qa-modal-prompt") as HTMLTextAreaElement;
+  const resetBtn = document.getElementById("qa-modal-reset") as HTMLButtonElement;
+
+  if (!overlay) return;
+
+  if (opts.mode === "add-custom") {
+    titleEl.textContent = "New Custom Prompt";
+    nameInput.value = "";
+    promptInput.value = "";
+    nameInput.readOnly = false;
+    resetBtn.style.display = "none";
+  } else if (opts.mode === "edit-builtin") {
+    titleEl.textContent = "Edit: " + (opts.name || "");
+    nameInput.value = opts.name || "";
+    nameInput.readOnly = true;
+    promptInput.value = opts.prompt || opts.defaultPrompt || "";
+    resetBtn.style.display = isBuiltinModified(opts.name || "") ? "inline-block" : "none";
+  } else {
+    titleEl.textContent = "Edit: " + (opts.name || "");
+    nameInput.value = opts.name || "";
+    nameInput.readOnly = false;
+    promptInput.value = opts.prompt || "";
+    resetBtn.style.display = "none";
+  }
+
+  overlay.classList.add("visible");
+}
+
+function closePromptEditor(): void {
+  document.getElementById("qa-modal-overlay")?.classList.remove("visible");
+}
+
+function setupQuickActions(): void {
+  const bar = document.getElementById("quick-actions-bar");
+  if (!bar) return;
+
+  function closeAllDropdowns() {
+    bar.querySelectorAll(".qa-dropdown.visible").forEach(d => d.classList.remove("visible"));
+    bar.querySelectorAll(".qa-pill.active").forEach(p => p.classList.remove("active"));
+  }
+
+  function renderBar() {
+    bar.innerHTML = "";
+    const overrides = getBuiltinOverrides();
+    const customPrompts = getCustomPrompts();
+
+    // Built-in categories
+    for (const cat of QUICK_ACTIONS_DEFAULTS) {
+      const pill = document.createElement("div");
+      pill.className = "qa-pill";
+      pill.textContent = cat.label;
+
+      const dropdown = document.createElement("div");
+      dropdown.className = "qa-dropdown";
+
+      for (const action of cat.actions) {
+        const effectivePrompt = getEffectivePrompt(action.name, action.prompt);
+        const modified = isBuiltinModified(action.name);
+
+        const row = document.createElement("div");
+        row.className = "qa-action";
+
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "qa-action-name";
+        nameSpan.textContent = action.name;
+        nameSpan.addEventListener("click", (e) => {
+          e.stopPropagation();
+          closeAllDropdowns();
+          executeQuickAction(effectivePrompt);
+        });
+
+        const icons = document.createElement("span");
+        icons.className = "qa-action-icons";
+        if (modified) {
+          const dot = document.createElement("span");
+          dot.className = "qa-modified-dot";
+          dot.title = "Customized";
+          icons.appendChild(dot);
+        }
+        const editBtn = document.createElement("span");
+        editBtn.className = "qa-action-edit";
+        editBtn.textContent = "✏️";
+        editBtn.title = "Edit prompt";
+        editBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          closeAllDropdowns();
+          openPromptEditor({
+            mode: "edit-builtin",
+            name: action.name,
+            prompt: effectivePrompt,
+            defaultPrompt: action.prompt,
+          });
+        });
+        icons.appendChild(editBtn);
+
+        row.appendChild(nameSpan);
+        row.appendChild(icons);
+        dropdown.appendChild(row);
+      }
+
+      pill.appendChild(dropdown);
+      pill.addEventListener("click", (e) => {
+        if ((e.target as HTMLElement).closest(".qa-action")) return;
+        const wasActive = pill.classList.contains("active");
+        closeAllDropdowns();
+        if (!wasActive) {
+          pill.classList.add("active");
+          dropdown.classList.add("visible");
+        }
+      });
+      bar.appendChild(pill);
+    }
+
+    // Custom category
+    const customPill = document.createElement("div");
+    customPill.className = "qa-pill";
+    customPill.textContent = "⭐ Custom";
+
+    const customDropdown = document.createElement("div");
+    customDropdown.className = "qa-dropdown";
+
+    for (let i = 0; i < customPrompts.length; i++) {
+      const cp = customPrompts[i];
+      const row = document.createElement("div");
+      row.className = "qa-action";
+
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "qa-action-name";
+      nameSpan.textContent = cp.name;
+      nameSpan.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeAllDropdowns();
+        executeQuickAction(cp.prompt);
+      });
+
+      const icons = document.createElement("span");
+      icons.className = "qa-action-icons";
+      const editBtn = document.createElement("span");
+      editBtn.className = "qa-action-edit";
+      editBtn.textContent = "✏️";
+      editBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeAllDropdowns();
+        openPromptEditor({ mode: "edit-custom", name: cp.name, prompt: cp.prompt, customIndex: i });
+      });
+      const delBtn = document.createElement("span");
+      delBtn.className = "qa-action-delete";
+      delBtn.textContent = "✕";
+      delBtn.title = "Delete";
+      delBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const prompts = getCustomPrompts();
+        prompts.splice(i, 1);
+        saveCustomPrompts(prompts);
+        renderBar();
+      });
+      icons.appendChild(editBtn);
+      icons.appendChild(delBtn);
+
+      row.appendChild(nameSpan);
+      row.appendChild(icons);
+      customDropdown.appendChild(row);
+    }
+
+    // Add custom prompt button
+    const addRow = document.createElement("div");
+    addRow.className = "qa-add-custom";
+    if (customPrompts.length > 0) addRow.classList.add("qa-custom-actions");
+    addRow.textContent = "+ Add Custom Prompt";
+    addRow.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeAllDropdowns();
+      openPromptEditor({ mode: "add-custom" });
+    });
+    customDropdown.appendChild(addRow);
+
+    customPill.appendChild(customDropdown);
+    customPill.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).closest(".qa-action, .qa-add-custom")) return;
+      const wasActive = customPill.classList.contains("active");
+      closeAllDropdowns();
+      if (!wasActive) {
+        customPill.classList.add("active");
+        customDropdown.classList.add("visible");
+      }
+    });
+    bar.appendChild(customPill);
+  }
+
+  // Close dropdowns when clicking outside
+  document.addEventListener("click", (e) => {
+    if (!(e.target as HTMLElement).closest(".qa-pill")) {
+      closeAllDropdowns();
+    }
+  });
+
+  // Modal handlers
+  document.getElementById("qa-modal-cancel")?.addEventListener("click", closePromptEditor);
+  document.getElementById("qa-modal-overlay")?.addEventListener("click", (e) => {
+    if (e.target === document.getElementById("qa-modal-overlay")) closePromptEditor();
+  });
+
+  document.getElementById("qa-modal-reset")?.addEventListener("click", () => {
+    if (qaModalMode === "edit-builtin" && qaModalActionName) {
+      const overrides = getBuiltinOverrides();
+      delete overrides[qaModalActionName];
+      saveBuiltinOverrides(overrides);
+      closePromptEditor();
+      renderBar();
+    }
+  });
+
+  document.getElementById("qa-modal-save")?.addEventListener("click", () => {
+    const nameInput = document.getElementById("qa-modal-name") as HTMLInputElement;
+    const promptInput = document.getElementById("qa-modal-prompt") as HTMLTextAreaElement;
+    const name = nameInput.value.trim();
+    const prompt = promptInput.value.trim();
+    if (!name || !prompt) return;
+
+    if (qaModalMode === "edit-builtin" && qaModalActionName) {
+      const defaultPrompt = getDefaultPrompt(qaModalActionName);
+      const overrides = getBuiltinOverrides();
+      if (prompt === defaultPrompt) {
+        delete overrides[qaModalActionName];
+      } else {
+        overrides[qaModalActionName] = prompt;
+      }
+      saveBuiltinOverrides(overrides);
+    } else if (qaModalMode === "edit-custom" && qaModalCustomIndex >= 0) {
+      const prompts = getCustomPrompts();
+      if (qaModalCustomIndex < prompts.length) {
+        prompts[qaModalCustomIndex] = { name, prompt };
+        saveCustomPrompts(prompts);
+      }
+    } else if (qaModalMode === "add-custom") {
+      const prompts = getCustomPrompts();
+      prompts.push({ name, prompt });
+      saveCustomPrompts(prompts);
+    }
+
+    closePromptEditor();
+    renderBar();
+  });
+
+  // Load custom prompts from server as backup (merge missing ones)
+  fetch("http://localhost:3001/api/prompts/custom").then(r => r.json()).then(j => {
+    if (j?.ok && Array.isArray(j.data) && j.data.length > 0) {
+      const local = getCustomPrompts();
+      const localNames = new Set(local.map(p => p.name));
+      let added = false;
+      for (const sp of j.data) {
+        if (!localNames.has(sp.name)) {
+          local.push(sp);
+          added = true;
+        }
+      }
+      if (added) {
+        localStorage.setItem("sidebar-custom-prompts", JSON.stringify(local));
+        renderBar();
+      }
+    }
+  }).catch(() => {});
+
+  renderBar();
 }
