@@ -1905,27 +1905,45 @@ async function handleCommand(command: string, params: any): Promise<any> {
           }
           const file = result.value;
           const sliceCount = file.sliceCount;
-          const chunks: string[] = [];
-          let slicesReceived = 0;
+          const slices: Uint8Array[] = [];
+          let totalBytes = 0;
+
           const getSlice = (index: number) => {
             file.getSliceAsync(index, (sliceResult) => {
               if (sliceResult.status === Office.AsyncResultStatus.Failed) {
                 file.closeAsync();
                 return resolve({ error: sliceResult.error.message });
               }
+
               const bytes = new Uint8Array(sliceResult.value.data);
-              let binary = '';
-              for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-              chunks.push(btoa(binary));
-              slicesReceived++;
-              if (slicesReceived === sliceCount) {
+              slices.push(bytes);
+              totalBytes += bytes.length;
+
+              if (index + 1 === sliceCount) {
+                // Concatenate bytes in-order, then base64 encode once.
+                const combined = new Uint8Array(totalBytes);
+                let offset = 0;
+                for (const part of slices) {
+                  combined.set(part, offset);
+                  offset += part.length;
+                }
+
+                // Convert to base64 in chunks to avoid call stack / arg limits.
+                const CHUNK = 0x8000;
+                let binary = "";
+                for (let i = 0; i < combined.length; i += CHUNK) {
+                  const sub = combined.subarray(i, i + CHUNK);
+                  binary += String.fromCharCode(...Array.from(sub));
+                }
+
                 file.closeAsync();
-                resolve({ pdf: chunks.join(''), slices: sliceCount });
+                resolve({ pdf: btoa(binary), slices: sliceCount, bytes: totalBytes });
               } else {
                 getSlice(index + 1);
               }
             });
           };
+
           getSlice(0);
         });
       });
@@ -2590,7 +2608,7 @@ const QUICK_ACTIONS_DEFAULTS: QuickActionCategory[] = [
     actions: [
       { name: "Check Bluebook", prompt: "Review all citations in this document for Bluebook formatting errors. List each error with the paragraph number, the incorrect citation, and the corrected version." },
       { name: "Long/Short Cites", prompt: "Check that every short citation in this document has a corresponding full citation earlier in the document. Flag any short cites that don't match a prior long cite, and any long cites that are repeated unnecessarily." },
-      { name: "TOA Pages", prompt: "__DIRECT_ACTION__checkToaPages" },
+      { name: "TOA Pages", prompt: "Audit the Table of Authorities using fuzzy legal judgment (not deterministic string matching). Compare each TOA entry's listed pages against where that authority appears to be cited in the brief body and footnotes. Handle citation variants (short cites, reporter abbreviations, party-name variants, supra/infra references, punctuation differences, wrapped lines).\n\nOutput three sections:\n1) High-confidence TOA page errors\n2) Medium-confidence possible mismatches\n3) Needs manual review\n\nFor each flagged entry include: authority, listed pages, likely actual pages, confidence level, and 1-2 sentence rationale." },
       { name: "Find Uncited", prompt: "Identify any factual assertions in this document that lack a supporting citation or footnote." },
     ]
   },
@@ -2700,17 +2718,26 @@ async function runDirectAction(action: string, displayLabel: string): Promise<vo
 
   try {
     const res = await fetch(`http://localhost:3001/api/toa/check`, { method: "POST" });
-    const data = await res.json();
-    
-    if (data.error) {
+    const raw = await res.json();
+    const payload = raw?.data ?? raw;
+
+    if (!raw?.ok && (raw?.error || payload?.error)) {
       textEl.classList.remove("streaming-cursor");
-      textEl.innerHTML = `<strong>Error:</strong> ${data.error}`;
+      textEl.innerHTML = `<strong>Error:</strong> ${raw?.error || payload?.error}`;
       return;
     }
 
-    const results = data.results || [];
+    const results = payload?.results || [];
+    const totalEntries = payload?.totalEntries ?? results.length;
+
+    if (!totalEntries) {
+      textEl.classList.remove("streaming-cursor");
+      textEl.innerHTML = `<strong>TOA check couldn't run:</strong> No TOA entries were detected. Make sure the document has a populated Table of Authorities section.`;
+      return;
+    }
+
     let html = `<strong>Table of Authorities Check</strong><br>`;
-    html += `<span style="font-size:11px;opacity:0.7">${data.totalEntries} entries checked</span><br><br>`;
+    html += `<span style="font-size:11px;opacity:0.7">${totalEntries} entries checked</span><br><br>`;
 
     const correct = results.filter((r: any) => r.status === "correct");
     const incorrect = results.filter((r: any) => r.status === "incorrect");
