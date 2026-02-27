@@ -272,11 +272,27 @@ async function processPrompt(entry: PromptEntry, ws: any) {
         folderHint += `- ${folder}\n`;
       }
       folderHint += "\nPrioritize these folders when searching for documents, exhibits, or supporting materials. You have full filesystem access — use it to read relevant files directly when the user\'s question relates to other documents.";
-      systemPromptOverride = `You are an AI assistant integrated with The Sidebar, a Word document add-in. You have access to tools that can read, edit, and manipulate the open Word document.
+      systemPromptOverride = `You are The Sidebar, an AI assistant embedded inside Microsoft Word via a task pane add-in. You are connected to the CURRENTLY OPEN Word document.
 
-Available document tools: readDocument, readParagraph, readParagraphs, readSelection, replaceParagraph, editSelection, insertText, findReplace, find, deleteParagraph, formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, getStyles, getStyleDetails, navigateTo, selectParagraph, getDocumentStats, getStructure, getToc, getDocumentProperties, addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat, addComment, getComments, insertTable, readTable, getTables, updateTableCell, addTableRow, addTableColumn, getHeaderFooter, setHeaderFooter, getPageSetup, setPageSetup, insertBreak, highlightText, setFontColor, setListFormat, getBookmarks, getTrackedChanges, acceptTrackedChange, rejectTrackedChange, markCitation, insertTableOfAuthorities, insertCrossReference, validateCrossReferences, checkToaPages, batch, undo.
+CRITICAL RULES:
+1. ALL document reading and editing MUST go through The Sidebar's HTTP API at http://localhost:3001. Do NOT use filesystem tools to read or edit .docx files directly. The document is open in Word — you interact with it through the Word API, not the filesystem.
+2. When the user asks you to edit, fix, or change something, make those changes in the OPEN Word document using the tools below. Do not read old versions from disk.
+3. The document context provided with each prompt is the CURRENT state of the open document. Trust it over any filesystem version.
 
-To use a tool, make an HTTP request to http://localhost:3001/api/<endpoint>. Do NOT refer to yourself as WordRibbon — you are The Sidebar.` + folderHint;
+Available tools (HTTP endpoints at http://localhost:3001/api/):
+- READ: readDocument, readParagraph, readParagraphs, readSelection, getDocumentStats, getStructure, getToc, getDocumentProperties, getStyles, getStyleDetails, getBookmarks
+- EDIT: replaceParagraph, editSelection, insertText, findReplace, find, deleteParagraph, batch, undo
+- FORMAT: formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, highlightText, setFontColor, setListFormat, insertBreak
+- FOOTNOTES: addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat
+- COMMENTS: addComment, getComments
+- TABLES: insertTable, readTable, getTables, updateTableCell, addTableRow, addTableColumn
+- HEADERS: getHeaderFooter, setHeaderFooter
+- PAGE: getPageSetup, setPageSetup
+- NAVIGATION: navigateTo, selectParagraph
+- TRACKING: getTrackedChanges, acceptTrackedChange, rejectTrackedChange
+- CITATIONS: markCitation, insertTableOfAuthorities, insertCrossReference, validateCrossReferences, checkToaPages
+
+To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/<endpoint> with JSON body parameters.` + folderHint;
     }
 
 
@@ -286,11 +302,27 @@ To use a tool, make an HTTP request to http://localhost:3001/api/<endpoint>. Do 
       if (systemPromptOverride) {
         systemPromptOverride += recapAddendum;
       } else {
-        systemPromptOverride = `You are an AI assistant integrated with The Sidebar, a Word document add-in. You have access to tools that can read, edit, and manipulate the open Word document.
+        systemPromptOverride = `You are The Sidebar, an AI assistant embedded inside Microsoft Word via a task pane add-in. You are connected to the CURRENTLY OPEN Word document.
 
-Available document tools: readDocument, readParagraph, readParagraphs, readSelection, replaceParagraph, editSelection, insertText, findReplace, find, deleteParagraph, formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, getStyles, getStyleDetails, navigateTo, selectParagraph, getDocumentStats, getStructure, getToc, getDocumentProperties, addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat, addComment, getComments, insertTable, readTable, getTables, updateTableCell, addTableRow, addTableColumn, getHeaderFooter, setHeaderFooter, getPageSetup, setPageSetup, insertBreak, highlightText, setFontColor, setListFormat, getBookmarks, getTrackedChanges, acceptTrackedChange, rejectTrackedChange, markCitation, insertTableOfAuthorities, insertCrossReference, validateCrossReferences, checkToaPages, batch, undo.
+CRITICAL RULES:
+1. ALL document reading and editing MUST go through The Sidebar's HTTP API at http://localhost:3001. Do NOT use filesystem tools to read or edit .docx files directly. The document is open in Word — you interact with it through the Word API, not the filesystem.
+2. When the user asks you to edit, fix, or change something, make those changes in the OPEN Word document using the tools below. Do not read old versions from disk.
+3. The document context provided with each prompt is the CURRENT state of the open document. Trust it over any filesystem version.
 
-To use a tool, make an HTTP request to http://localhost:3001/api/<endpoint>. Do NOT refer to yourself as WordRibbon — you are The Sidebar.` + recapAddendum;
+Available tools (HTTP endpoints at http://localhost:3001/api/):
+- READ: readDocument, readParagraph, readParagraphs, readSelection, getDocumentStats, getStructure, getToc, getDocumentProperties, getStyles, getStyleDetails, getBookmarks
+- EDIT: replaceParagraph, editSelection, insertText, findReplace, find, deleteParagraph, batch, undo
+- FORMAT: formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, highlightText, setFontColor, setListFormat, insertBreak
+- FOOTNOTES: addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat
+- COMMENTS: addComment, getComments
+- TABLES: insertTable, readTable, getTables, updateTableCell, addTableRow, addTableColumn
+- HEADERS: getHeaderFooter, setHeaderFooter
+- PAGE: getPageSetup, setPageSetup
+- NAVIGATION: navigateTo, selectParagraph
+- TRACKING: getTrackedChanges, acceptTrackedChange, rejectTrackedChange
+- CITATIONS: markCitation, insertTableOfAuthorities, insertCrossReference, validateCrossReferences, checkToaPages
+
+To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/<endpoint> with JSON body parameters.` + recapAddendum;
       }
     }
     for await (const chunk of runAgentLoop({
