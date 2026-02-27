@@ -101,8 +101,8 @@ export function httpRequest(
       rejectUnauthorized: false,
     }, (res) => resolve(res));
     req.on("error", reject);
-    req.setTimeout(options.timeoutMs ?? 60000, () => {
-      req.destroy(new Error(`Request timeout after ${options.timeoutMs ?? 60000}ms: ${url}`));
+    req.setTimeout(options.timeoutMs ?? 300000, () => {
+      req.destroy(new Error(`Request timeout after ${options.timeoutMs ?? 300000}ms: ${url}`));
     });
     if (body !== undefined) {
       req.write(typeof body === "string" ? body : JSON.stringify(body));
