@@ -564,6 +564,18 @@
       30% { transform: translateY(-4px); opacity: 1; }
     }
 
+    /* ===== Progress text in thinking indicator ===== */
+    .progress-text {
+      font-size: 12px;
+      color: var(--text-secondary);
+      font-style: italic;
+      animation: progressFadeIn 0.15s ease-in;
+    }
+    @keyframes progressFadeIn {
+      from { opacity: 0.3; }
+      to { opacity: 1; }
+    }
+
     /* ===== Session management ===== */
     .session-management {
       margin-top: 16px;
@@ -700,6 +712,23 @@
     }
     .change-line .old-text { color: #ef4444; text-decoration: line-through; }
     .change-line .new-text { color: #22c55e; }
+    .mode-toggle {
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+      background: var(--bg-tertiary, #f0f0f0);
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+    .mode-toggle.tracking {
+      background: var(--accent, #6366f1);
+      color: white;
+      border-color: var(--accent, #6366f1);
+    }
   </style>
 </head>
 <body>
@@ -777,6 +806,7 @@
             <option value="">Model…</option>
           </select>
         </div>
+        <button class="mode-toggle" id="mode-toggle" title="Toggle Track Changes">⚡ YOLO</button>
       </div>
       <div class="textarea-wrap">
         <textarea id="prompt-input" rows="3" placeholder="Ask about your document..." autocomplete="off"></textarea>

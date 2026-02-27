@@ -17,6 +17,7 @@ import https from "https";
 import { URL } from "url";
 import { TOOL_DEFINITIONS, TOOL_ENDPOINTS, ToolEndpoint } from "./tools";
 import { routePrompt, RouterConfig, PromptContext, httpRequest } from "./llm-router";
+import { isTrackChangesEnabled } from "./track-changes";
 
 /** Maximum number of tool-calling iterations to prevent infinite loops */
 const MAX_ITERATIONS = 15;
@@ -369,7 +370,7 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
   // Initial context — structured for optimal prompt caching:
   // systemPrompt is stable (cacheable), documentContext changes only when doc changes
   const context: PromptContext = {
-    systemPrompt: systemPrompt || "You are a helpful assistant that can read and edit Word documents. Use the provided tools to interact with the document when needed.",
+    systemPrompt: (systemPrompt || "You are a helpful assistant that can read and edit Word documents. Use the provided tools to interact with the document when needed.") + (isTrackChangesEnabled() ? "\nNote: Track Changes is enabled in the document. The user will review your edits. Be precise about what you are changing and why." : ""),
     documentContext,
     tools: TOOL_DEFINITIONS,
     messages,

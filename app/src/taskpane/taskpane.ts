@@ -149,6 +149,7 @@ Office.onReady((info) => {
     setupPromptUI();
     void loadModels();
     setupSettingsUI();
+    setupTrackChangesToggle();
     connectWebSocket();
     // Initialize document session after WebSocket connects
     setTimeout(() => initSession(), 1000);
@@ -399,10 +400,31 @@ function connectWebSocket() {
         return;
       }
       if (msg.type === "prompt_progress") {
-        removeThinkingIndicator();
         const promptId = msg.promptId as number | undefined;
         const progressText = msg.text as string | undefined;
-        if (!progressText || promptId === undefined) return;
+        const progressLabel = msg.progressText as string | undefined;
+        if (promptId === undefined) return;
+
+        // If we have a descriptive progress label (tool activity), show it in thinking indicator
+        if (progressLabel && !progressText) {
+          const thinkingEl = document.getElementById("thinking-indicator");
+          if (thinkingEl) {
+            // Replace dots with progress text
+            let labelEl = thinkingEl.querySelector(".progress-text") as HTMLElement;
+            if (!labelEl) {
+              thinkingEl.innerHTML = "";
+              labelEl = document.createElement("span");
+              labelEl.className = "progress-text";
+              thinkingEl.appendChild(labelEl);
+            }
+            // Trigger re-animation by cloning
+            const newLabel = labelEl.cloneNode(false) as HTMLElement;
+            newLabel.textContent = progressLabel;
+            labelEl.replaceWith(newLabel);
+          }
+        }
+
+        if (!progressText) return;
         const history = document.getElementById("prompt-history")!;
         // Update or create streaming entry
         let streamEl = history.querySelector(`[data-streaming-for="${promptId}"]`) as HTMLElement | null;
@@ -1505,6 +1527,72 @@ function setupSettingsUI(): void {
         statusEl.textContent = "✕ Failed to save settings";
         statusEl.classList.add("error");
       }
+    }
+  });
+}
+
+// ── Track Changes / YOLO Mode ──
+let trackChangesMode = false;
+
+function setupTrackChangesToggle(): void {
+  const modeToggle = document.getElementById("mode-toggle");
+  if (!modeToggle) return;
+
+  modeToggle.addEventListener("click", async () => {
+    trackChangesMode = !trackChangesMode;
+    modeToggle.textContent = trackChangesMode ? "🔍 Track" : "⚡ YOLO";
+    modeToggle.classList.toggle("tracking", trackChangesMode);
+
+    // Tell Word to enable/disable track changes
+    try {
+      await Word.run(async (context) => {
+        if (trackChangesMode) {
+          context.document.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
+        } else {
+          context.document.changeTrackingMode = Word.ChangeTrackingMode.off;
+        }
+        await context.sync();
+      });
+    } catch (e) {
+      console.warn("changeTrackingMode not available:", e);
+    }
+
+    // Tell the server
+    fetch("http://localhost:3001/api/settings/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ trackChanges: trackChangesMode }),
+    }).catch(() => {});
+
+    // Persist preference
+    localStorage.setItem("sidebar-track-changes", String(trackChangesMode));
+  });
+
+  // Restore on load
+  const savedMode = localStorage.getItem("sidebar-track-changes");
+  if (savedMode === "true") {
+    trackChangesMode = true;
+    modeToggle.textContent = "🔍 Track";
+    modeToggle.classList.add("tracking");
+    Word.run(async (context) => {
+      context.document.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
+      await context.sync();
+    }).catch(() => {});
+    // Also tell server on load
+    fetch("http://localhost:3001/api/settings/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ trackChanges: true }),
+    }).catch(() => {});
+  }
+
+  // Restore original state when leaving
+  window.addEventListener("beforeunload", () => {
+    if (trackChangesMode) {
+      Word.run(async (context) => {
+        context.document.changeTrackingMode = Word.ChangeTrackingMode.off;
+        await context.sync();
+      }).catch(() => {});
     }
   });
 }

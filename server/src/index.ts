@@ -1,3 +1,4 @@
+import { setTrackChanges, isTrackChangesEnabled } from "./track-changes";
 import { runAgentLoop } from "./agent-loop";
 import { v4 as uuidv4 } from "uuid";
 import { saveSession, loadSession, deleteSession, cleanExpiredSessions, ensureMachineKey, SessionData } from "./sessions";
@@ -49,6 +50,10 @@ let conversationHistory: { role: string; content: string }[] = [];
 let currentSessionData: SessionData | null = null;
 // ── In-Memory Document Index ──
 let documentIndex: { paragraphs: {index: number, text: string, listString?: string}[], builtAt: number, hash: string } | null = null;
+
+
+
+
 
 async function buildDocumentIndex(): Promise<typeof documentIndex> {
   try {
@@ -654,6 +659,15 @@ server.listen(PORT, "127.0.0.1", () => {
 // ── Settings ──
 app.get("/api/settings", handleGetSettings());
 app.post("/api/settings", handlePostSettings());
+
+
+app.post("/api/settings/mode", (req, res) => {
+  setTrackChanges(req.body?.trackChanges ?? false);
+  res.json({ ok: true, data: { trackChanges: isTrackChangesEnabled() } });
+});
+app.get("/api/settings/mode", (_req, res) => {
+  res.json({ ok: true, data: { trackChanges: isTrackChangesEnabled() } });
+});
 
 // ── OpenClaw Connection Test ──
 app.post("/api/openclaw/test", async (req, res) => {
