@@ -195,8 +195,8 @@
     }
     .new-chat-btn {
       cursor: pointer;
-      font-size: 13px;
-      opacity: 0.5;
+      font-size: 15px;
+      opacity: 0.6;
       transition: opacity 0.2s, transform 0.1s;
       user-select: none;
       background: none;
@@ -501,6 +501,42 @@
     }
     .add-endpoint:hover { text-decoration: underline; }
 
+    /* ===== Revert button ===== */
+    .chat-entry.chat-assistant {
+      position: relative;
+    }
+    .revert-btn {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      background: none;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      padding: 2px 6px;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.15s, background 0.15s;
+      line-height: 1.4;
+    }
+    .chat-entry.chat-assistant:hover .revert-btn {
+      opacity: 1;
+    }
+    .revert-btn:hover {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+    }
+    .revert-btn.reverted {
+      opacity: 0.5;
+      cursor: default;
+      text-decoration: line-through;
+    }
+    .chat-entry.reverted {
+      opacity: 0.4;
+      text-decoration: line-through;
+    }
+
     /* ===== Thinking indicator ===== */
     .chat-thinking {
       align-self: flex-start;
@@ -603,7 +639,7 @@
         <span id="pane-name">—</span>
       </div>
       <div class="header-right">
-        <button class="new-chat-btn" id="new-chat-btn" title="New conversation">✚</button>
+        <button class="new-chat-btn" id="new-chat-btn" title="New Chat">✚ New</button>
         <button class="theme-toggle" id="theme-toggle" title="Toggle theme">☀️</button>
 
       </div>

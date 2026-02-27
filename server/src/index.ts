@@ -57,6 +57,16 @@ const promptLog = new Map<number, PromptEntry>();
 let promptId = 0;
 const promptWaiters: { resolve: (v: any) => void; timer: NodeJS.Timeout }[] = [];
 
+// ── Change Tracking & Revert ──
+const MODIFYING_TOOLS = new Set([
+  "updateParagraph", "replaceParagraph", "replaceSelection", "editSelection",
+  "findReplace", "insert", "format", "setStyleFont", "addFootnote",
+  "updateFootnote", "addComment", "batch",
+]);
+/** Maps exchangeId → number of modifying tool calls made during that exchange */
+const exchangeUndoCounts: Map<number, number> = new Map();
+let exchangeIdCounter = 0;
+
 
 // ── Auto-process prompts via agent loop ──
 async function processPrompt(entry: PromptEntry, ws: any) {
@@ -115,7 +125,9 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       }
     }
 
-    // Run agent loop and stream results
+    // Run agent loop and stream results — track modifying tool calls for revert
+    const currentExchangeId = ++exchangeIdCounter;
+    let modifyingCallCount = 0;
     let fullResponse = "";
     for await (const chunk of runAgentLoop({
       prompt: fullPrompt,
@@ -125,6 +137,7 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       sessionUser: isOpenClaw ? sessionId : undefined,
       conversationHistory: !isOpenClaw ? managedHistory : undefined,
       onToolCall: (call) => {
+        if (MODIFYING_TOOLS.has(call.name)) modifyingCallCount++;
         if (ws.readyState === 1) {
           ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: `Using tool: ${call.name}...` }));
         }
@@ -142,9 +155,20 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     // Keep history bounded
     if (conversationHistory.length > 40) conversationHistory = conversationHistory.slice(-20);
 
+    // Track undo count for this exchange
+    const hasChanges = modifyingCallCount > 0;
+    if (hasChanges) {
+      exchangeUndoCounts.set(currentExchangeId, modifyingCallCount);
+      // Keep map bounded
+      if (exchangeUndoCounts.size > 50) {
+        const oldest = exchangeUndoCounts.keys().next().value;
+        if (oldest !== undefined) exchangeUndoCounts.delete(oldest);
+      }
+    }
+
     // Send final response
     if (ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: fullResponse || "(No response)", timestamp: Date.now() }));
+      ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: fullResponse || "(No response)", timestamp: Date.now(), hasChanges, exchangeId: currentExchangeId }));
     }
   } catch (e: any) {
     console.error("[agent] Error processing prompt:", e.message);
@@ -415,6 +439,34 @@ app.get("/api/undo/history", apiHandler("undoHistory"));
 // Advanced
 app.post("/api/track-changes", apiHandler("trackChanges"));
 app.post("/api/batch", apiHandler("batch"));
+
+// ── Revert Endpoint ──
+app.post("/api/revert/:exchangeId", async (req: express.Request, res: express.Response) => {
+  const exchangeId = parseInt(req.params.exchangeId, 10);
+  if (!Number.isFinite(exchangeId)) return res.status(400).json({ ok: false, error: "valid exchangeId required" });
+
+  // Collect undo counts for this exchange and all subsequent ones
+  let totalUndos = 0;
+  const toRemove: number[] = [];
+  for (const [eid, count] of exchangeUndoCounts) {
+    if (eid >= exchangeId) {
+      totalUndos += count;
+      toRemove.push(eid);
+    }
+  }
+
+  if (totalUndos === 0) return res.status(404).json({ ok: false, error: "No changes to revert for this exchange" });
+
+  try {
+    for (let i = 0; i < totalUndos; i++) {
+      await sendCommand("undo");
+    }
+    for (const eid of toRemove) exchangeUndoCounts.delete(eid);
+    res.json({ ok: true, data: { exchangeId, undoCount: totalUndos, revertedExchanges: toRemove } });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 
 // Start
 // ── Session Management ──

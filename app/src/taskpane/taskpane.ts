@@ -333,6 +333,15 @@ function connectWebSocket() {
             textEl.innerHTML = renderMarkdown(responseText);
             el.appendChild(roleEl);
             el.appendChild(textEl);
+            // Add revert button if this exchange made document changes
+            if (msg.hasChanges && msg.exchangeId) {
+              const revertBtn = document.createElement("button");
+              revertBtn.className = "revert-btn";
+              revertBtn.textContent = "↩ Revert";
+              revertBtn.setAttribute("data-exchange-id", String(msg.exchangeId));
+              revertBtn.addEventListener("click", () => handleRevert(revertBtn, msg.exchangeId));
+              el.appendChild(revertBtn);
+            }
             userEl.insertAdjacentElement("afterend", el);
             inserted = true;
           }
@@ -1013,6 +1022,47 @@ async function handleCommand(command: string, params: any): Promise<any> {
       });
     default:
       throw new Error(`Unknown command: ${command}`);
+  }
+}
+
+// ── Revert Handler ──
+async function handleRevert(btn: HTMLButtonElement, exchangeId: number): Promise<void> {
+  if (btn.classList.contains("reverted")) return;
+  btn.textContent = "Reverting...";
+  btn.disabled = true;
+  try {
+    const r = await fetch(`http://localhost:3001/api/revert/${exchangeId}`, { method: "POST" });
+    const j = await r.json();
+    if (j.ok) {
+      btn.textContent = "↩ Reverted";
+      btn.classList.add("reverted");
+      // Grey out all subsequent exchanges that were also reverted
+      const revertedIds: number[] = j.data?.revertedExchanges || [exchangeId];
+      const history = document.getElementById("prompt-history");
+      if (history) {
+        const allEntries = history.querySelectorAll(".chat-entry.chat-assistant");
+        let foundCurrent = false;
+        allEntries.forEach((entry) => {
+          const entryBtn = entry.querySelector(".revert-btn") as HTMLButtonElement | null;
+          const eid = entryBtn?.getAttribute("data-exchange-id");
+          if (eid && revertedIds.includes(parseInt(eid, 10))) {
+            entry.classList.add("reverted");
+            if (entryBtn && entryBtn !== btn) {
+              entryBtn.textContent = "↩ Reverted";
+              entryBtn.classList.add("reverted");
+              entryBtn.disabled = true;
+            }
+          }
+        });
+      }
+    } else {
+      btn.textContent = "↩ Failed";
+      btn.disabled = false;
+    }
+  } catch (e) {
+    console.error("Revert failed:", e);
+    btn.textContent = "↩ Failed";
+    btn.disabled = false;
   }
 }
 
