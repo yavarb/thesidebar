@@ -78,3 +78,35 @@
 b {
     font-weight: bold;
 }
+/* ── Streaming Cursor ── */
+.streaming-cursor::after {
+  content: '▊';
+  animation: blink 0.8s step-end infinite;
+  color: var(--accent, #0078d7);
+  margin-left: 1px;
+  font-weight: normal;
+}
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+/* ── Tool Progress Lines ── */
+.tool-progress-container {
+  margin-top: 4px;
+}
+.tool-progress-line {
+  font-size: 11px;
+  color: var(--text-secondary, #666);
+  padding: 2px 0;
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  animation: fadeInLine 0.15s ease-out;
+}
+.tool-progress-line .spinner {
+  display: inline-block;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadeInLine { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: translateY(0); } }
+.tool-progress-line.complete { opacity: 0.5; }
+.tool-progress-line.complete .spinner { display: none; }
+.tool-progress-line.complete::after { content: ' ✓'; color: #22c55e; }

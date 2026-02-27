@@ -82,6 +82,19 @@ const pendingPromptEls = new Map<string, HTMLElement>();
 let selectedModel = "";
 let currentDocSessionId: string | null = null;
 
+
+// ── Smooth Auto-Scroll (throttled via rAF) ──
+let scrollPending = false;
+function smoothScroll(el: HTMLElement) {
+  if (!scrollPending) {
+    scrollPending = true;
+    requestAnimationFrame(() => {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+      scrollPending = false;
+    });
+  }
+}
+
 function addThinkingIndicator(): HTMLElement {
   const history = document.getElementById("prompt-history")!;
   const el = document.createElement("div");
@@ -430,13 +443,64 @@ function connectWebSocket() {
         const promptId = msg.promptId as number | undefined;
         const progressText = msg.text as string | undefined;
         const progressLabel = msg.progressText as string | undefined;
+        const toolStatus = msg.status as string | undefined;
+        const toolName = msg.toolName as string | undefined;
         if (promptId === undefined) return;
+
+        const history = document.getElementById("prompt-history")!;
+
+        // Handle tool execution progress
+        if (toolStatus === "tool" && toolName) {
+          removeThinkingIndicator();
+          // Get or create the streaming entry to attach tool lines to
+          let streamEl = history.querySelector(`[data-streaming-for="${promptId}"]`) as HTMLElement | null;
+          if (!streamEl) {
+            streamEl = document.createElement("div");
+            streamEl.className = "chat-entry chat-assistant";
+            streamEl.setAttribute("data-streaming-for", String(promptId));
+            const roleEl = document.createElement("div");
+            roleEl.className = "chat-role";
+            roleEl.textContent = "Assistant";
+            const textEl = document.createElement("div");
+            textEl.className = "chat-text streaming-cursor";
+            streamEl.appendChild(roleEl);
+            streamEl.appendChild(textEl);
+            const toolContainer = document.createElement("div");
+            toolContainer.className = "tool-progress-container";
+            streamEl.appendChild(toolContainer);
+            const userEl = history.querySelector(`[data-prompt-id="${promptId}"]`) as HTMLElement | null;
+            if (userEl) userEl.insertAdjacentElement("afterend", streamEl);
+            else history.appendChild(streamEl);
+          }
+          let toolContainer = streamEl.querySelector(".tool-progress-container") as HTMLElement;
+          if (!toolContainer) {
+            toolContainer = document.createElement("div");
+            toolContainer.className = "tool-progress-container";
+            streamEl.appendChild(toolContainer);
+          }
+          const line = document.createElement("div");
+          line.className = "tool-progress-line";
+          line.setAttribute("data-tool", toolName);
+          line.innerHTML = `<span class="spinner">⟳</span> ${escapeHtml(progressLabel || toolName)}`;
+          toolContainer.appendChild(line);
+          smoothScroll(history);
+          return;
+        }
+
+        if (toolStatus === "tool_complete" && toolName) {
+          const streamEl = history.querySelector(`[data-streaming-for="${promptId}"]`) as HTMLElement | null;
+          if (streamEl) {
+            const lines = streamEl.querySelectorAll(`.tool-progress-line[data-tool="${toolName}"]:not(.complete)`);
+            const line = lines[lines.length - 1] as HTMLElement | undefined;
+            if (line) line.classList.add("complete");
+          }
+          return;
+        }
 
         // If we have a descriptive progress label (tool activity), show it in thinking indicator
         if (progressLabel && !progressText) {
           const thinkingEl = document.getElementById("thinking-indicator");
           if (thinkingEl) {
-            // Replace dots with progress text
             let labelEl = thinkingEl.querySelector(".progress-text") as HTMLElement;
             if (!labelEl) {
               thinkingEl.innerHTML = "";
@@ -444,7 +508,6 @@ function connectWebSocket() {
               labelEl.className = "progress-text";
               thinkingEl.appendChild(labelEl);
             }
-            // Trigger re-animation by cloning
             const newLabel = labelEl.cloneNode(false) as HTMLElement;
             newLabel.textContent = progressLabel;
             labelEl.replaceWith(newLabel);
@@ -452,10 +515,10 @@ function connectWebSocket() {
         }
 
         if (!progressText) return;
-        const history = document.getElementById("prompt-history")!;
-        // Update or create streaming entry
+        // Update or create streaming entry — use plain text during streaming for speed
         let streamEl = history.querySelector(`[data-streaming-for="${promptId}"]`) as HTMLElement | null;
         if (!streamEl) {
+          removeThinkingIndicator();
           streamEl = document.createElement("div");
           streamEl.className = "chat-entry chat-assistant";
           streamEl.setAttribute("data-streaming-for", String(promptId));
@@ -463,18 +526,24 @@ function connectWebSocket() {
           roleEl.className = "chat-role";
           roleEl.textContent = "Assistant";
           const textEl = document.createElement("div");
-          textEl.className = "chat-text";
-          textEl.innerHTML = renderMarkdown(progressText);
+          textEl.className = "chat-text streaming-cursor";
+          textEl.textContent = progressText;
           streamEl.appendChild(roleEl);
           streamEl.appendChild(textEl);
+          const toolContainer = document.createElement("div");
+          toolContainer.className = "tool-progress-container";
+          streamEl.appendChild(toolContainer);
           const userEl = history.querySelector(`[data-prompt-id="${promptId}"]`) as HTMLElement | null;
           if (userEl) userEl.insertAdjacentElement("afterend", streamEl);
           else history.appendChild(streamEl);
         } else {
           const textEl = streamEl.querySelector(".chat-text") as HTMLElement;
-          if (textEl) textEl.innerHTML = renderMarkdown(progressText);
+          if (textEl) {
+            textEl.textContent = progressText;
+            textEl.classList.add("streaming-cursor");
+          }
         }
-        history.scrollTop = history.scrollHeight;
+        smoothScroll(history);
         return;
       }
       if (msg.type === "prompt_response") {
@@ -482,10 +551,17 @@ function connectWebSocket() {
         const promptId = msg.promptId as number | undefined;
         const responseText = msg.text as string | undefined;
         if (!responseText) return;
-        // Remove streaming preview if it exists
+        // Capture tool progress lines from streaming preview before removing
+        let toolProgressHtml = "";
         if (promptId !== undefined) {
           const streamEl = document.getElementById("prompt-history")?.querySelector(`[data-streaming-for="${promptId}"]`);
-          if (streamEl) streamEl.remove();
+          if (streamEl) {
+            const toolContainer = streamEl.querySelector(".tool-progress-container");
+            if (toolContainer && toolContainer.children.length > 0) {
+              toolProgressHtml = toolContainer.outerHTML;
+            }
+            streamEl.remove();
+          }
         }
         const history = document.getElementById("prompt-history")!;
         let inserted = false;
@@ -503,6 +579,17 @@ function connectWebSocket() {
             textEl.innerHTML = renderMarkdown(responseText);
             el.appendChild(roleEl);
             el.appendChild(textEl);
+            // Re-attach tool progress lines from streaming
+            if (toolProgressHtml) {
+              const temp = document.createElement("div");
+              temp.innerHTML = toolProgressHtml;
+              const container = temp.firstElementChild;
+              if (container) {
+                // Mark all lines as complete
+                container.querySelectorAll(".tool-progress-line:not(.complete)").forEach(l => l.classList.add("complete"));
+                el.appendChild(container);
+              }
+            }
             // Add revert button if this exchange made document changes
             if (msg.hasChanges && msg.exchangeId) {
               const revertBtn = document.createElement("button");
@@ -1229,7 +1316,742 @@ async function handleCommand(command: string, params: any): Promise<any> {
           compareWordCount: compareWords.length,
         };
       });
-    default:
+
+    // ── Tables ──
+    case "getTables":
+      return Word.run(async (ctx) => {
+        const tables = ctx.document.body.tables;
+        tables.load("count");
+        await ctx.sync();
+        const result: any[] = [];
+        for (let i = 0; i < tables.count; i++) {
+          const t = tables.items[i];
+          t.load("rowCount,headerRowCount");
+        }
+        await ctx.sync();
+        return { count: tables.count, tables: tables.items.map((t, i) => ({ index: i, rowCount: t.rowCount, headerRows: t.headerRowCount })) };
+      });
+
+    case "readTable":
+      return Word.run(async (ctx) => {
+        const tables = ctx.document.body.tables;
+        tables.load("count");
+        await ctx.sync();
+        const idx = params?.index ?? 0;
+        if (idx >= tables.count) throw new Error("Table index out of range");
+        const table = tables.items[idx];
+        table.load("rowCount,values,headerRowCount");
+        await ctx.sync();
+        return { rowCount: table.rowCount, headerRowCount: table.headerRowCount, values: table.values };
+      });
+
+    case "insertTable":
+      return Word.run(async (ctx) => {
+        const body = ctx.document.body;
+        const rows = params?.rows || 2;
+        const cols = params?.columns || 2;
+        const table = body.insertTable(rows, cols, Word.InsertLocation.end, params?.values || []);
+        if (params?.style) table.styleBuiltIn = params.style;
+        await ctx.sync();
+        return { success: true, rows, columns: cols };
+      });
+
+    case "updateTableCell":
+      return Word.run(async (ctx) => {
+        const tables = ctx.document.body.tables;
+        tables.load("count");
+        await ctx.sync();
+        const table = tables.items[params?.tableIndex || 0];
+        const cell = table.getCell(params.row, params.column);
+        cell.body.clear();
+        cell.body.insertText(params.text, Word.InsertLocation.start);
+        await ctx.sync();
+        return { success: true };
+      });
+
+    case "addTableRow":
+      return Word.run(async (ctx) => {
+        const tables = ctx.document.body.tables;
+        tables.load("count");
+        await ctx.sync();
+        const table = tables.items[params?.tableIndex || 0];
+        table.addRows(params?.position === "start" ? Word.InsertLocation.start : Word.InsertLocation.end, 1, params?.values ? [params.values] : []);
+        await ctx.sync();
+        return { success: true };
+      });
+
+    case "addTableColumn":
+      return Word.run(async (ctx) => {
+        const tables = ctx.document.body.tables;
+        tables.load("count");
+        await ctx.sync();
+        const table = tables.items[params?.tableIndex || 0];
+        table.addColumns(params?.position === "start" ? Word.InsertLocation.start : Word.InsertLocation.end, 1, params?.values ? [params.values] : []);
+        await ctx.sync();
+        return { success: true };
+      });
+
+    // ── Headers & Footers ──
+    case "getHeaderFooter":
+      return Word.run(async (ctx) => {
+        const sections = ctx.document.sections;
+        sections.load("items");
+        await ctx.sync();
+        const section = sections.items[params?.sectionIndex || 0];
+        const headerType = params?.headerType === "firstPage" ? Word.HeaderFooterType.firstPage
+          : params?.headerType === "evenPages" ? Word.HeaderFooterType.evenPages
+          : Word.HeaderFooterType.primary;
+        const hf = params?.type === "footer"
+          ? section.getFooter(headerType)
+          : section.getHeader(headerType);
+        hf.load("text");
+        await ctx.sync();
+        return { text: hf.text, type: params?.type || "header", headerType: params?.headerType || "primary" };
+      });
+
+    case "setHeaderFooter":
+      return Word.run(async (ctx) => {
+        const sections = ctx.document.sections;
+        sections.load("items");
+        await ctx.sync();
+        const section = sections.items[params?.sectionIndex || 0];
+        const headerType = params?.headerType === "firstPage" ? Word.HeaderFooterType.firstPage
+          : params?.headerType === "evenPages" ? Word.HeaderFooterType.evenPages
+          : Word.HeaderFooterType.primary;
+        const hf = params?.type === "footer"
+          ? section.getFooter(headerType)
+          : section.getHeader(headerType);
+        hf.clear();
+        hf.insertText(params.text, Word.InsertLocation.start);
+        await ctx.sync();
+        return { success: true };
+      });
+
+    // ── Delete Paragraph ──
+    case "deleteParagraph":
+      return Word.run(async (ctx) => {
+        const paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        await ctx.sync();
+        const idx = params?.index;
+        if (idx === undefined || idx < 0 || idx >= paragraphs.items.length) throw new Error("Index out of range");
+        paragraphs.items[idx].delete();
+        await ctx.sync();
+        return { success: true };
+      });
+
+    // ── Breaks ──
+    case "insertBreak":
+      return Word.run(async (ctx) => {
+        const paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        await ctx.sync();
+        const afterIdx = params?.afterParagraph ?? paragraphs.items.length - 1;
+        const para = paragraphs.items[afterIdx];
+        const breakType = params?.breakType === "section" ? Word.BreakType.sectionNext
+          : params?.breakType === "sectionContinuous" ? Word.BreakType.sectionContinuous
+          : Word.BreakType.page;
+        para.insertBreak(breakType, Word.InsertLocation.after);
+        await ctx.sync();
+        return { success: true };
+      });
+
+    // ── Lists ──
+    case "setListFormat":
+      return Word.run(async (ctx) => {
+        const paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        await ctx.sync();
+        const from = params?.fromIndex;
+        const to = params?.toIndex ?? from;
+        if (from === undefined) throw new Error("fromIndex required");
+        for (let i = from; i <= to && i < paragraphs.items.length; i++) {
+          const para = paragraphs.items[i];
+          if (params?.type === "bullet") {
+            para.startNewList();
+          } else if (params?.type === "numbered") {
+            para.startNewList();
+          } else if (params?.type === "none") {
+            try { para.detachFromList(); } catch {}
+          }
+        }
+        await ctx.sync();
+        return { success: true };
+      });
+
+    // ── Bookmarks ──
+    case "getBookmarks":
+      return Word.run(async (ctx) => {
+        try {
+          const bookmarks = ctx.document.body.getRange().getBookmarks();
+          await ctx.sync();
+          return { bookmarks: bookmarks.value };
+        } catch {
+          return { bookmarks: [], note: "Bookmarks API not available in this Word version" };
+        }
+      });
+
+    // ── Highlight & Font Color ──
+    case "highlightText":
+      return Word.run(async (ctx) => {
+        const results = ctx.document.body.search(params.text, { matchCase: params?.matchCase || false });
+        results.load("items");
+        await ctx.sync();
+        for (const item of results.items) {
+          item.font.highlightColor = params?.color || "yellow";
+        }
+        await ctx.sync();
+        return { count: results.items.length };
+      });
+
+    case "setFontColor":
+      return Word.run(async (ctx) => {
+        const paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        await ctx.sync();
+        const para = paragraphs.items[params.index];
+        if (params?.text) {
+          const results = para.search(params.text, { matchCase: true });
+          results.load("items");
+          await ctx.sync();
+          for (const r of results.items) r.font.color = params.color || "black";
+        } else {
+          para.font.color = params.color || "black";
+        }
+        await ctx.sync();
+        return { success: true };
+      });
+
+    // ── Paragraph Format ──
+    case "setParagraphFormat":
+      return Word.run(async (ctx) => {
+        const paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        await ctx.sync();
+        const para = paragraphs.items[params.index];
+        if (params.spaceBefore !== undefined) para.spaceBefore = params.spaceBefore;
+        if (params.spaceAfter !== undefined) para.spaceAfter = params.spaceAfter;
+        if (params.lineSpacing !== undefined) para.lineSpacing = params.lineSpacing;
+        if (params.leftIndent !== undefined) para.leftIndent = params.leftIndent;
+        if (params.rightIndent !== undefined) para.rightIndent = params.rightIndent;
+        if (params.firstLineIndent !== undefined) para.firstLineIndent = params.firstLineIndent;
+        if (params.alignment !== undefined) para.alignment = params.alignment;
+        await ctx.sync();
+        return { success: true };
+      });
+
+    // ── Tracked Changes ──
+    case "getTrackedChanges":
+      return Word.run(async (ctx) => {
+        try {
+          const body = ctx.document.body;
+          const trackedChanges = body.getTrackedChanges();
+          trackedChanges.load("items");
+          await ctx.sync();
+          for (const tc of trackedChanges.items) tc.load("text,type");
+          await ctx.sync();
+          return { count: trackedChanges.items.length, changes: trackedChanges.items.map((tc: any, i: number) => ({ index: i, text: tc.text, type: tc.type })) };
+        } catch { return { error: "Tracked changes API not available in this version of Word", changes: [] }; }
+      });
+
+    case "acceptTrackedChange":
+      return Word.run(async (ctx) => {
+        try {
+          const trackedChanges = ctx.document.body.getTrackedChanges();
+          trackedChanges.load("items");
+          await ctx.sync();
+          if (params?.all) {
+            trackedChanges.acceptAll();
+          } else if (params?.index !== undefined) {
+            trackedChanges.items[params.index].accept();
+          }
+          await ctx.sync();
+          return { success: true };
+        } catch { return { error: "Tracked changes API not available" }; }
+      });
+
+    case "rejectTrackedChange":
+      return Word.run(async (ctx) => {
+        try {
+          const trackedChanges = ctx.document.body.getTrackedChanges();
+          trackedChanges.load("items");
+          await ctx.sync();
+          if (params?.all) {
+            trackedChanges.rejectAll();
+          } else if (params?.index !== undefined) {
+            trackedChanges.items[params.index].reject();
+          }
+          await ctx.sync();
+          return { success: true };
+        } catch { return { error: "Tracked changes API not available" }; }
+      });
+
+    // ── Style Operations ──
+    case "applyStyle":
+      return Word.run(async (ctx) => {
+        const { fromIndex, toIndex, styleName } = params || {};
+        if (fromIndex === undefined || !styleName) throw new Error("fromIndex and styleName required");
+        const paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        await ctx.sync();
+        const to = toIndex ?? fromIndex;
+        for (let i = fromIndex; i <= to && i < paragraphs.items.length; i++) {
+          paragraphs.items[i].style = styleName;
+        }
+        await ctx.sync();
+        return { success: true, applied: to - fromIndex + 1 };
+      });
+
+    case "createStyle":
+      return Word.run(async (ctx) => {
+        const { name, basedOn, fontName, fontSize, bold, italic, color, spaceBefore, spaceAfter, lineSpacing, alignment } = params || {};
+        if (!name) throw new Error("params.name required");
+        const style = ctx.document.addStyle(name, Word.StyleType.paragraph);
+        if (basedOn) style.baseStyle = basedOn;
+        if (fontName) style.font.name = fontName;
+        if (fontSize) style.font.size = fontSize;
+        if (bold !== undefined) style.font.bold = bold;
+        if (italic !== undefined) style.font.italic = italic;
+        if (color) style.font.color = color;
+        if (spaceBefore !== undefined) style.paragraphFormat.spaceBefore = spaceBefore;
+        if (spaceAfter !== undefined) style.paragraphFormat.spaceAfter = spaceAfter;
+        if (lineSpacing !== undefined) style.paragraphFormat.lineSpacing = lineSpacing;
+        if (alignment !== undefined) style.paragraphFormat.alignment = alignment;
+        await ctx.sync();
+        return { success: true, name };
+      });
+
+    case "modifyStyle":
+      return Word.run(async (ctx) => {
+        const { styleName, fontName, fontSize, bold, italic, color, spaceBefore, spaceAfter, lineSpacing, alignment } = params || {};
+        if (!styleName) throw new Error("params.styleName required");
+        const style = ctx.document.getStyles().getByNameOrNullObject(styleName);
+        style.load("nameLocal");
+        await ctx.sync();
+        if (style.isNullObject) throw new Error(`Style "${styleName}" not found`);
+        if (fontName) style.font.name = fontName;
+        if (fontSize) style.font.size = fontSize;
+        if (bold !== undefined) style.font.bold = bold;
+        if (italic !== undefined) style.font.italic = italic;
+        if (color) style.font.color = color;
+        if (spaceBefore !== undefined) style.paragraphFormat.spaceBefore = spaceBefore;
+        if (spaceAfter !== undefined) style.paragraphFormat.spaceAfter = spaceAfter;
+        if (lineSpacing !== undefined) style.paragraphFormat.lineSpacing = lineSpacing;
+        if (alignment !== undefined) style.paragraphFormat.alignment = alignment;
+        await ctx.sync();
+        return { success: true, styleName };
+      });
+
+    case "getStyleDetails":
+      return Word.run(async (ctx) => {
+        const { styleName } = params || {};
+        if (!styleName) throw new Error("params.styleName required");
+        const style = ctx.document.getStyles().getByNameOrNullObject(styleName);
+        style.load("nameLocal,type,builtIn,baseStyle");
+        await ctx.sync();
+        if (style.isNullObject) throw new Error(`Style "${styleName}" not found`);
+        style.font.load("name,size,bold,italic,color,underline");
+        style.paragraphFormat.load("spaceBefore,spaceAfter,lineSpacing,alignment,leftIndent,rightIndent,firstLineIndent");
+        await ctx.sync();
+        return {
+          name: style.nameLocal, type: style.type, builtIn: style.builtIn,
+          baseStyle: style.baseStyle,
+          font: { name: style.font.name, size: style.font.size, bold: style.font.bold, italic: style.font.italic, color: style.font.color, underline: style.font.underline },
+          paragraphFormat: {
+            spaceBefore: style.paragraphFormat.spaceBefore, spaceAfter: style.paragraphFormat.spaceAfter,
+            lineSpacing: style.paragraphFormat.lineSpacing, alignment: style.paragraphFormat.alignment,
+            leftIndent: style.paragraphFormat.leftIndent, rightIndent: style.paragraphFormat.rightIndent,
+            firstLineIndent: style.paragraphFormat.firstLineIndent,
+          },
+        };
+      });
+
+    // ── Footnotes (expanded) ──
+    case "deleteFootnote":
+      return Word.run(async (ctx) => {
+        const footnotes = ctx.document.body.footnotes;
+        footnotes.load("items");
+        await ctx.sync();
+        const idx = params?.index;
+        if (idx === undefined || idx < 0 || idx >= footnotes.items.length) throw new Error("Footnote index out of range");
+        footnotes.items[idx].delete();
+        await ctx.sync();
+        return { success: true };
+      });
+
+    case "getFootnoteBody":
+      return Word.run(async (ctx) => {
+        const footnotes = ctx.document.body.footnotes;
+        footnotes.load("items");
+        await ctx.sync();
+        const idx = params?.index;
+        if (idx === undefined || idx < 0 || idx >= footnotes.items.length) throw new Error("Footnote index out of range");
+        const fn = footnotes.items[idx];
+        fn.body.load("text");
+        fn.body.paragraphs.load("items");
+        await ctx.sync();
+        for (const p of fn.body.paragraphs.items) p.load("text,style");
+        await ctx.sync();
+        return {
+          index: idx,
+          text: fn.body.text,
+          paragraphs: fn.body.paragraphs.items.map((p: any, i: number) => ({ index: i, text: p.text, style: p.style })),
+        };
+      });
+
+    case "insertFootnoteWithFormat":
+      return Word.run(async (ctx) => {
+        const { anchorText, footnoteText, matchCase } = params || {};
+        if (!anchorText || !footnoteText) throw new Error("anchorText and footnoteText required");
+        const results = ctx.document.body.search(anchorText, { matchCase: matchCase ?? true });
+        results.load("items");
+        await ctx.sync();
+        if (results.items.length === 0) throw new Error(`Anchor text "${anchorText}" not found`);
+        const range = results.items[0].getRange(Word.RangeLocation.end);
+        const fn = range.insertFootnote(footnoteText);
+        fn.body.load("text");
+        await ctx.sync();
+        return { body: fn.body.text };
+      });
+
+    case "reorderFootnotes":
+      return Word.run(async (ctx) => {
+        const footnotes = ctx.document.body.footnotes;
+        footnotes.load("items");
+        await ctx.sync();
+        const result: any[] = [];
+        for (let i = 0; i < footnotes.items.length; i++) {
+          const fn = footnotes.items[i];
+          fn.body.load("text");
+          fn.reference.load("text");
+        }
+        await ctx.sync();
+        for (let i = 0; i < footnotes.items.length; i++) {
+          const fn = footnotes.items[i];
+          result.push({ index: i, body: fn.body.text, referenceText: fn.reference.text });
+        }
+        return { footnotes: result, count: result.length };
+      });
+
+    // ── Citations / Table of Authorities ──
+    case "markCitation":
+      return Word.run(async (ctx) => {
+        const { shortCite, longCite, category, searchText } = params || {};
+        if (!shortCite || !longCite) throw new Error("shortCite and longCite required");
+        // Category: 1=Cases, 2=Statutes, 3=Other Authorities, 4=Rules
+        const cat = category || 1;
+        // Find the text to mark
+        const anchor = searchText || shortCite;
+        const results = ctx.document.body.search(anchor, { matchCase: true });
+        results.load("items");
+        await ctx.sync();
+        if (results.items.length === 0) throw new Error(`Text "${anchor}" not found in document`);
+        // Insert TA field code: { TA \l "longCite" \s "shortCite" \c category }
+        const fieldCode = `TA \\l "${longCite}" \\s "${shortCite}" \\c ${cat}`;
+        const range = results.items[0].getRange(Word.RangeLocation.end);
+        range.insertText(" ", Word.InsertLocation.after);
+        const fieldRange = range.getRange(Word.RangeLocation.after);
+        try {
+          fieldRange.insertField(Word.InsertLocation.end, Word.FieldType.empty, fieldCode, true);
+          await ctx.sync();
+          return { success: true, shortCite, longCite, category: cat };
+        } catch {
+          // Fallback: insert as hidden text field code marker
+          const marker = `{${fieldCode}}`;
+          range.insertText(marker, Word.InsertLocation.after);
+          await ctx.sync();
+          return { success: true, shortCite, longCite, category: cat, note: "Inserted as text marker (insertField API not available)" };
+        }
+      });
+
+    case "insertTableOfAuthorities":
+      return Word.run(async (ctx) => {
+        const { category, paragraphIndex } = params || {};
+        // Insert a TOA field: { TOA \c category }
+        const cat = category || 0; // 0 = all categories
+        const fieldCode = cat > 0 ? `TOA \\c ${cat}` : `TOA`;
+        let insertRange: Word.Range;
+        if (paragraphIndex !== undefined) {
+          const paragraphs = ctx.document.body.paragraphs;
+          paragraphs.load("items");
+          await ctx.sync();
+          insertRange = paragraphs.items[paragraphIndex].getRange(Word.RangeLocation.after);
+        } else {
+          insertRange = ctx.document.body.getRange(Word.RangeLocation.end);
+        }
+        try {
+          insertRange.insertField(Word.InsertLocation.end, Word.FieldType.empty, fieldCode, true);
+          await ctx.sync();
+          return { success: true, category: cat };
+        } catch {
+          insertRange.insertText(`[Table of Authorities${cat > 0 ? ` — Category ${cat}` : ""}]\n{${fieldCode}}`, Word.InsertLocation.end);
+          await ctx.sync();
+          return { success: true, category: cat, note: "Inserted as text placeholder (insertField API not available)" };
+        }
+      });
+
+    // ── Cross-References ──
+    case "insertCrossReference":
+      return Word.run(async (ctx) => {
+        const { type, target, text, paragraphIndex } = params || {};
+        if (!type || !target) throw new Error("type and target required");
+        // type: "heading", "footnote", "bookmark"
+        let refText = text || "";
+        if (type === "heading") {
+          // Find the heading paragraph and generate reference text
+          const paragraphs = ctx.document.body.paragraphs;
+          paragraphs.load("items");
+          await ctx.sync();
+          for (const p of paragraphs.items) p.load("text,style");
+          await ctx.sync();
+          const heading = paragraphs.items.find((p: any) => p.text.includes(target) && p.style.toLowerCase().includes("heading"));
+          if (!heading) throw new Error(`Heading containing "${target}" not found`);
+          if (!refText) refText = heading.text.trim();
+        } else if (type === "footnote") {
+          if (!refText) refText = `footnote ${target}`;
+        } else if (type === "bookmark") {
+          if (!refText) refText = target;
+        }
+        // Insert a cross-reference field
+        const fieldCode = type === "heading" ? `REF "${target}" \\h`
+          : type === "bookmark" ? `REF ${target} \\h`
+          : `NOTEREF ${target} \\h`;
+        let insertRange: Word.Range;
+        if (paragraphIndex !== undefined) {
+          const paragraphs = ctx.document.body.paragraphs;
+          paragraphs.load("items");
+          await ctx.sync();
+          insertRange = paragraphs.items[paragraphIndex].getRange(Word.RangeLocation.end);
+        } else {
+          const sel = ctx.document.getSelection();
+          insertRange = sel.getRange(Word.RangeLocation.end);
+        }
+        try {
+          insertRange.insertField(Word.InsertLocation.end, Word.FieldType.empty, fieldCode, true);
+          await ctx.sync();
+          return { success: true, type, target, fieldCode };
+        } catch {
+          // Fallback: insert as styled text
+          insertRange.insertText(refText, Word.InsertLocation.end);
+          await ctx.sync();
+          return { success: true, type, target, note: "Inserted as plain text (insertField API not available)" };
+        }
+      });
+
+    case "validateCrossReferences":
+      return Word.run(async (ctx) => {
+        const paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        await ctx.sync();
+        // Collect all heading texts
+        const headings: { index: number; text: string; level: number; style: string }[] = [];
+        const allText: { index: number; text: string }[] = [];
+        const batchSize = 200;
+        for (let i = 0; i < paragraphs.items.length; i += batchSize) {
+          const batch = paragraphs.items.slice(i, i + batchSize);
+          for (const p of batch) p.load("text,style");
+          await ctx.sync();
+          for (let j = 0; j < batch.length; j++) {
+            const p = batch[j];
+            allText.push({ index: i + j, text: p.text });
+            const sLow = p.style.toLowerCase();
+            if (sLow.startsWith("heading") || sLow.includes("heading")) {
+              const m = p.style.match(/\d+/);
+              headings.push({ index: i + j, text: p.text.trim(), level: m ? parseInt(m[0], 10) : 1, style: p.style });
+            }
+          }
+        }
+        // Patterns to validate
+        const patterns = [
+          /Section\s+(\d+[\.\d]*)/gi,
+          /Article\s+([IVXLCDM]+|\d+)/gi,
+          /see\s+supra\s+(?:Section\s+)?(\S+)/gi,
+          /see\s+infra\s+(?:Section\s+)?(\S+)/gi,
+          /¶\s*(\d+)/gi,
+          /Part\s+([IVXLCDM]+|\d+)/gi,
+        ];
+        const issues: { paragraphIndex: number; text: string; reference: string; pattern: string; found: boolean }[] = [];
+        for (const para of allText) {
+          for (const pat of patterns) {
+            pat.lastIndex = 0;
+            let match;
+            while ((match = pat.exec(para.text)) !== null) {
+              const ref = match[0];
+              const refTarget = match[1];
+              // Check if any heading contains this reference
+              const found = headings.some(h => h.text.includes(refTarget) || h.text.includes(ref));
+              if (!found) {
+                issues.push({
+                  paragraphIndex: para.index,
+                  text: para.text.substring(Math.max(0, match.index - 20), match.index + ref.length + 20),
+                  reference: ref,
+                  pattern: pat.source,
+                  found: false,
+                });
+              }
+            }
+          }
+        }
+        return { headingCount: headings.length, issueCount: issues.length, issues, headings: headings.map(h => ({ index: h.index, text: h.text, level: h.level })) };
+      });
+    case "exportPdf": {
+      return new Promise((resolve, _reject) => {
+        Office.context.document.getFileAsync(Office.FileType.Pdf, { sliceSize: 65536 }, (result) => {
+          if (result.status === Office.AsyncResultStatus.Failed) {
+            return resolve({ error: result.error.message });
+          }
+          const file = result.value;
+          const sliceCount = file.sliceCount;
+          const chunks: string[] = [];
+          let slicesReceived = 0;
+          const getSlice = (index: number) => {
+            file.getSliceAsync(index, (sliceResult) => {
+              if (sliceResult.status === Office.AsyncResultStatus.Failed) {
+                file.closeAsync();
+                return resolve({ error: sliceResult.error.message });
+              }
+              const bytes = new Uint8Array(sliceResult.value.data);
+              let binary = '';
+              for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+              chunks.push(btoa(binary));
+              slicesReceived++;
+              if (slicesReceived === sliceCount) {
+                file.closeAsync();
+                resolve({ pdf: chunks.join(''), slices: sliceCount });
+              } else {
+                getSlice(index + 1);
+              }
+            });
+          };
+          getSlice(0);
+        });
+      });
+    }
+
+    case "getToaEntries": {
+      return Word.run(async (ctx) => {
+        const body = ctx.document.body;
+        const paragraphs = body.paragraphs;
+        paragraphs.load("items");
+        await ctx.sync();
+        const entries: Array<{text: string, pages: string}> = [];
+        let inToa = false;
+        for (const para of paragraphs.items) {
+          para.load("text,style");
+        }
+        await ctx.sync();
+        for (const para of paragraphs.items) {
+          const text = para.text.trim();
+          if (text.toUpperCase().includes("TABLE OF AUTHORITIES")) {
+            inToa = true;
+            continue;
+          }
+          if (inToa && (text.toUpperCase().includes("TABLE OF CONTENTS") ||
+              para.style?.startsWith("Heading 1") ||
+              text.toUpperCase() === "INTRODUCTION" ||
+              text.toUpperCase() === "PRELIMINARY STATEMENT" ||
+              text.toUpperCase() === "ARGUMENT")) {
+            break;
+          }
+          if (inToa && text.length > 0) {
+            const dotMatch = text.match(/^(.+?)\s*[.\u2026\u00b7]{2,}\s*(.+)$/);
+            if (dotMatch) {
+              entries.push({ text: dotMatch[1].trim(), pages: dotMatch[2].trim() });
+            } else {
+              const pageMatch = text.match(/^(.+?)\s+((?:\d+(?:,\s*)?)+|passim)\s*$/);
+              if (pageMatch) {
+                entries.push({ text: pageMatch[1].trim(), pages: pageMatch[2].trim() });
+              }
+            }
+          }
+        }
+        return { entries, count: entries.length };
+      });
+    }
+
+    case "getPageSetup": {
+      return Word.run(async (ctx) => {
+        const sections = ctx.document.sections;
+        sections.load("items");
+        await ctx.sync();
+        const section = sections.items[data.sectionIndex || 0];
+        section.load("headerDistance,footerDistance");
+        const body = section.body;
+        body.load("style");
+        await ctx.sync();
+        try {
+          (section as any).load("pageSetup");
+          await ctx.sync();
+          const ps = (section as any).pageSetup;
+          return {
+            topMargin: ps?.topMargin,
+            bottomMargin: ps?.bottomMargin,
+            leftMargin: ps?.leftMargin,
+            rightMargin: ps?.rightMargin,
+            gutter: ps?.gutter,
+            paperSize: ps?.paperSize,
+            headerDistance: section.headerDistance,
+            footerDistance: section.footerDistance
+          };
+        } catch {
+          return {
+            headerDistance: section.headerDistance,
+            footerDistance: section.footerDistance,
+            note: "Full page setup (margins) requires WordApi 1.5+. Available properties returned."
+          };
+        }
+      });
+    }
+
+    case "setPageSetup": {
+      return Word.run(async (ctx) => {
+        const sections = ctx.document.sections;
+        sections.load("items");
+        await ctx.sync();
+        const section = sections.items[data.sectionIndex || 0];
+        if (data.headerDistance !== undefined) section.headerDistance = data.headerDistance;
+        if (data.footerDistance !== undefined) section.footerDistance = data.footerDistance;
+        try {
+          const ps = (section as any).pageSetup;
+          if (data.topMargin !== undefined) ps.topMargin = data.topMargin;
+          if (data.bottomMargin !== undefined) ps.bottomMargin = data.bottomMargin;
+          if (data.leftMargin !== undefined) ps.leftMargin = data.leftMargin;
+          if (data.rightMargin !== undefined) ps.rightMargin = data.rightMargin;
+          if (data.gutter !== undefined) ps.gutter = data.gutter;
+          if (data.orientation !== undefined) ps.orientation = data.orientation;
+          if (data.paperSize !== undefined) ps.paperSize = data.paperSize;
+          await ctx.sync();
+          return { success: true };
+        } catch {
+          await ctx.sync();
+          return { success: true, note: "Only headerDistance/footerDistance set. Full margins require WordApi 1.5+" };
+        }
+      });
+    }
+
+    case "getPageNumbers": {
+      return Word.run(async (ctx) => {
+        const sections = ctx.document.sections;
+        sections.load("items");
+        await ctx.sync();
+        for (const s of sections.items) {
+          s.load("headerDistance,footerDistance");
+          s.body.load("text");
+        }
+        await ctx.sync();
+        return {
+          sectionCount: sections.items.length,
+          sections: sections.items.map((s, i) => ({
+            index: i,
+            headerDistance: s.headerDistance,
+            footerDistance: s.footerDistance,
+            bodyLength: s.body.text.length
+          }))
+        };
+      });
+    }
+
+        default:
       throw new Error(`Unknown command: ${command}`);
   }
 }

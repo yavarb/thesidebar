@@ -1,3 +1,4 @@
+import { parsePageContent, checkToaEntries } from "./toa-checker";
 import { setTrackChanges, isTrackChangesEnabled } from "./track-changes";
 import { runAgentLoop } from "./agent-loop";
 import { v4 as uuidv4 } from "uuid";
@@ -105,7 +106,14 @@ const promptWaiters: { resolve: (v: any) => void; timer: NodeJS.Timeout }[] = []
 const MODIFYING_TOOLS = new Set([
   "updateParagraph", "replaceParagraph", "replaceSelection", "editSelection",
   "findReplace", "insert", "format", "setStyleFont", "addFootnote",
-  "updateFootnote", "addComment", "batch",
+  "updateFootnote", "addComment", "batch", "deleteParagraph",
+  "insertTable", "updateTableCell", "addTableRow", "addTableColumn",
+  "setHeaderFooter", "insertBreak", "setListFormat", "highlightText",
+  "setFontColor", "setParagraphFormat", "acceptTrackedChange", "rejectTrackedChange",
+  "applyStyle", "createStyle", "modifyStyle", "deleteFootnote",
+  "insertFootnoteWithFormat", "markCitation", "insertTableOfAuthorities",
+  "insertCrossReference",
+  "setPageSetup",
 ]);
 /** Maps exchangeId → number of modifying tool calls made during that exchange */
 const exchangeUndoCounts: Map<number, number> = new Map();
@@ -127,12 +135,46 @@ const TOOL_PROGRESS: Record<string, (args: any) => string> = {
   insert: (a: any) => `📝 Inserting at paragraph ${a.paragraphIndex || a.index || 'end'}...`,
   addFootnote: () => "📝 Adding footnote...",
   updateFootnote: (a: any) => `📝 Updating footnote ${a.index}...`,
+  deleteFootnote: (a: any) => `🗑️ Deleting footnote ${a.index}...`,
+  getFootnoteBody: (a: any) => `📖 Reading footnote ${a.index}...`,
+  insertFootnoteWithFormat: () => "📝 Inserting formatted footnote...",
+  reorderFootnotes: () => "📖 Listing footnotes with locations...",
   format: () => "🎨 Formatting...",
   setStyleFont: () => "🎨 Updating style font...",
   addComment: () => "💬 Adding comment...",
   getDocumentStructure: () => "📋 Analyzing structure...",
   getDocumentStats: () => "📋 Getting document stats...",
   batch: () => "⚡ Executing batch operations...",
+  insertTable: () => "📊 Creating table...",
+  readTable: (a: any) => `📊 Reading table ${a.index}...`,
+  updateTableCell: (a: any) => `📊 Updating cell [${a.row},${a.column}]...`,
+  addTableRow: () => "📊 Adding table row...",
+  addTableColumn: () => "📊 Adding table column...",
+  getTables: () => "📊 Listing tables...",
+  getHeaderFooter: () => "📖 Reading header/footer...",
+  setHeaderFooter: () => "📝 Setting header/footer...",
+  deleteParagraph: (a: any) => `🗑️ Deleting paragraph ${a.index}...`,
+  insertBreak: () => "📄 Inserting break...",
+  setListFormat: () => "📝 Setting list format...",
+  getBookmarks: () => "🔖 Listing bookmarks...",
+  highlightText: (a: any) => `🖍️ Highlighting "${(a.text || '').slice(0, 20)}"...`,
+  setFontColor: () => "🎨 Setting font color...",
+  setParagraphFormat: (a: any) => `📐 Formatting paragraph ${a.index}...`,
+  getTrackedChanges: () => "📋 Listing tracked changes...",
+  acceptTrackedChange: () => "✅ Accepting tracked change...",
+  rejectTrackedChange: () => "❌ Rejecting tracked change...",
+  applyStyle: (a: any) => `🎨 Applying style "${a.styleName}"...`,
+  createStyle: (a: any) => `🎨 Creating style "${a.name}"...`,
+  modifyStyle: (a: any) => `🎨 Modifying style "${a.styleName}"...`,
+  getStyleDetails: (a: any) => `📋 Getting style details for "${a.styleName}"...`,
+  markCitation: (a: any) => `⚖️ Marking citation: ${(a.shortCite || '').slice(0, 30)}...`,
+  insertTableOfAuthorities: () => "⚖️ Inserting Table of Authorities...",
+  insertCrossReference: (a: any) => `🔗 Inserting cross-reference to ${a.type} "${(a.target || '').slice(0, 30)}"...`,
+  validateCrossReferences: () => "🔍 Validating cross-references...",
+  checkToaPages: () => "⚖️ Checking TOA pages (exporting PDF)...",
+  getPageSetup: () => "📐 Reading page setup...",
+  setPageSetup: () => "📐 Adjusting page margins...",
+  getPageNumbers: () => "📋 Getting page info...",
 };
 
 async function processPrompt(entry: PromptEntry, ws: any) {
@@ -253,10 +295,16 @@ async function processPrompt(entry: PromptEntry, ws: any) {
           modifyingCallCount++;
           invalidateIndex();
         }
+        (call as any)._startTime = Date.now();
         if (ws.readyState === 1) {
           const progressFn = TOOL_PROGRESS[call.name];
           const progressText = progressFn ? progressFn(call.arguments) : `Using tool: ${call.name}...`;
-          ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, progressText }));
+          ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, status: "tool", toolName: call.name, progressText }));
+        }
+      },
+      onToolResult: (result) => {
+        if (ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, status: "tool_complete", toolName: result.name }));
         }
       },
     })) {
@@ -267,6 +315,8 @@ async function processPrompt(entry: PromptEntry, ws: any) {
         } catch {}
         continue;
       }
+      // Skip internal control markers
+      if (chunk === "\n__TOOL_EXEC_START__") continue;
       fullResponse += chunk;
       if (ws.readyState === 1) {
         ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: fullResponse }));
@@ -607,6 +657,60 @@ app.get("/api/undo/history", apiHandler("undoHistory"));
 app.post("/api/track-changes", apiHandler("trackChanges"));
 app.post("/api/batch", apiHandler("batch"));
 
+// ── Tables ──
+app.get("/api/tables", apiHandler("getTables"));
+app.get("/api/table/:index", apiHandler("readTable", (req) => ({ index: parseInt(req.params.index, 10) })));
+app.post("/api/table/insert", apiHandler("insertTable"));
+app.post("/api/table/cell", apiHandler("updateTableCell"));
+app.post("/api/table/row", apiHandler("addTableRow"));
+app.post("/api/table/column", apiHandler("addTableColumn"));
+
+// ── Headers & Footers ──
+app.post("/api/header-footer", apiHandler("getHeaderFooter"));
+app.post("/api/header-footer/set", apiHandler("setHeaderFooter"));
+
+// ── Paragraph Operations ──
+app.post("/api/paragraph/delete", apiHandler("deleteParagraph"));
+app.post("/api/paragraph/format", apiHandler("setParagraphFormat"));
+
+// ── Breaks ──
+app.post("/api/break", apiHandler("insertBreak"));
+
+// ── Lists ──
+app.post("/api/list-format", apiHandler("setListFormat"));
+
+// ── Bookmarks ──
+app.get("/api/bookmarks", apiHandler("getBookmarks"));
+
+// ── Highlight & Font Color ──
+app.post("/api/highlight", apiHandler("highlightText"));
+app.post("/api/font-color", apiHandler("setFontColor"));
+
+// ── Tracked Changes ──
+app.get("/api/tracked-changes", apiHandler("getTrackedChanges"));
+app.post("/api/tracked-changes/accept", apiHandler("acceptTrackedChange"));
+app.post("/api/tracked-changes/reject", apiHandler("rejectTrackedChange"));
+
+// ── Style Operations ──
+app.post("/api/style/apply", apiHandler("applyStyle"));
+app.post("/api/style/create", apiHandler("createStyle"));
+app.post("/api/style/modify", apiHandler("modifyStyle"));
+app.post("/api/style/details", apiHandler("getStyleDetails"));
+
+// ── Footnotes (expanded) ──
+app.post("/api/footnote/delete", apiHandler("deleteFootnote"));
+app.get("/api/footnote/:index/body", apiHandler("getFootnoteBody", (req) => ({ index: parseInt(req.params.index, 10) })));
+app.post("/api/footnote/insert", apiHandler("insertFootnoteWithFormat"));
+app.get("/api/footnotes/detailed", apiHandler("reorderFootnotes"));
+
+// ── Citations / Table of Authorities ──
+app.post("/api/citation/mark", apiHandler("markCitation"));
+app.post("/api/citation/toa", apiHandler("insertTableOfAuthorities"));
+
+// ── Cross-References ──
+app.post("/api/cross-reference", apiHandler("insertCrossReference"));
+app.get("/api/cross-references/validate", apiHandler("validateCrossReferences"));
+
 // ── Revert Endpoint ──
 app.post("/api/revert/:exchangeId", async (req: express.Request, res: express.Response) => {
   const exchangeId = parseInt(req.params.exchangeId, 10);
@@ -886,3 +990,25 @@ app.get("/api/document/properties", apiHandler("getDocumentProperties"));
 
 // ── Diff (compare current paragraph to provided text) ──
 app.post("/api/paragraph/diff", apiHandler("diffParagraph"));
+
+// ── TOA Page Check ──
+app.post("/api/toa/check", async (_req, res) => {
+  try {
+    const toaResult = await sendCommand("getToaEntries", {});
+    if (!toaResult.entries?.length) return res.json({ ok: false, error: "No TOA entries found" });
+    const pdfResult = await sendCommand("exportPdf", {});
+    if (pdfResult.error || !pdfResult.pdf) return res.json({ ok: false, error: "PDF export failed: " + (pdfResult.error || "no data") });
+    const pages = await parsePageContent(pdfResult.pdf);
+    const results = checkToaEntries(pages, toaResult.entries);
+    res.json({ ok: true, data: { results, totalEntries: results.length, correct: results.filter((r: any) => r.status === "correct").length, incorrect: results.filter((r: any) => r.status === "incorrect").length, notFound: results.filter((r: any) => r.status === "not_found").length } });
+  } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ── Page Setup ──
+app.get("/api/page/setup", apiHandler("getPageSetup", (req) => ({
+  sectionIndex: req.query.sectionIndex ? parseInt(req.query.sectionIndex as string, 10) : 0,
+})));
+
+app.post("/api/page/setup", apiHandler("setPageSetup"));
+
+app.get("/api/page/info", apiHandler("getPageNumbers"));

@@ -384,12 +384,64 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
   while (iteration < maxIterations) {
     iteration++;
 
-    const { text, toolCalls } = await collectLLMResponse(currentPrompt, model, context, config);
+    // Stream text chunks immediately while collecting tool calls
+    let fullText = "";
+    const toolCalls: ToolCall[] = [];
+    const openaiToolAccum: Map<number, { id: string; name: string; args: string }> = new Map();
+    let anthropicCurrentTool: { id: string; name: string; argsJson: string } | null = null;
 
-    // No tool calls — this is the final response
+    for await (const chunk of routePrompt(currentPrompt, model, context, config)) {
+      let isToolEvent = false;
+      try {
+        const parsed = JSON.parse(chunk);
+        if (parsed.type === "tool_calls" && Array.isArray(parsed.delta)) {
+          isToolEvent = true;
+          for (const tc of parsed.delta) {
+            const idx = tc.index ?? 0;
+            if (!openaiToolAccum.has(idx)) {
+              openaiToolAccum.set(idx, { id: tc.id || "", name: tc.function?.name || "", args: "" });
+            }
+            const accum = openaiToolAccum.get(idx)!;
+            if (tc.id) accum.id = tc.id;
+            if (tc.function?.name) accum.name = tc.function.name;
+            if (tc.function?.arguments) accum.args += tc.function.arguments;
+          }
+        } else if (parsed.type === "tool_use_start") {
+          isToolEvent = true;
+          anthropicCurrentTool = { id: parsed.id, name: parsed.name, argsJson: "" };
+        } else if (parsed.type === "tool_input_delta") {
+          isToolEvent = true;
+          if (anthropicCurrentTool) anthropicCurrentTool.argsJson += parsed.delta;
+        } else if (parsed.type === "tool_use_complete") {
+          isToolEvent = true;
+          if (anthropicCurrentTool) {
+            let args: Record<string, any> = {};
+            try { args = JSON.parse(anthropicCurrentTool.argsJson); } catch {}
+            toolCalls.push({ id: anthropicCurrentTool.id, name: anthropicCurrentTool.name, arguments: args });
+            anthropicCurrentTool = null;
+          }
+        } else if (parsed.type === "openclaw_queued") {
+          fullText = chunk;
+          isToolEvent = true;
+        }
+      } catch {
+        // Not JSON — plain text content
+      }
+      if (!isToolEvent) {
+        fullText += chunk;
+        yield chunk; // Stream text to client immediately
+      }
+    }
+
+    // Finalize OpenAI tool calls
+    for (const [, accum] of openaiToolAccum) {
+      let args: Record<string, any> = {};
+      try { args = JSON.parse(accum.args); } catch {}
+      toolCalls.push({ id: accum.id, name: accum.name, arguments: args });
+    }
+
+    // No tool calls — final response already streamed
     if (toolCalls.length === 0) {
-      yield text;
-      // Yield change summaries as a special tagged message
       if (changeSummaries.length > 0) {
         yield "\n__CHANGE_SUMMARIES__" + JSON.stringify(changeSummaries);
       }
@@ -397,7 +449,7 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
     }
 
     // Add assistant's tool call response to history
-    messages.push({ role: "assistant", content: text || `[Tool calls: ${toolCalls.map(tc => tc.name).join(", ")}]` });
+    messages.push({ role: "assistant", content: fullText || `[Tool calls: ${toolCalls.map(tc => tc.name).join(", ")}]` });
 
     // Execute tool calls — batch when possible, navigate before edits
     const results: ToolResult[] = [];
