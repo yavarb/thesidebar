@@ -1051,14 +1051,6 @@ app.post("/api/toa/check", async (_req, res) => {
       }
     });
   } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
-})
-    if (!toaResult.entries?.length) return res.json({ ok: false, error: "No TOA entries found" });
-    const pdfResult = await sendCommand("exportPdf", {});
-    if (pdfResult.error || !pdfResult.pdf) return res.json({ ok: false, error: "PDF export failed: " + (pdfResult.error || "no data") });
-    const pages = await parsePageContent(pdfResult.pdf);
-    const results = checkToaEntries(pages, toaResult.entries);
-    res.json({ ok: true, data: { results, totalEntries: results.length, correct: results.filter((r: any) => r.status === "correct").length, incorrect: results.filter((r: any) => r.status === "incorrect").length, notFound: results.filter((r: any) => r.status === "not_found").length } });
-  } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ── Page Setup ──
