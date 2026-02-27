@@ -234,7 +234,7 @@ async function initSession(): Promise<void> {
       if (j?.ok && j.data?.found) {
         currentDocSessionId = existingId;
         if (j.data.conversationHistory?.length) {
-          repopulateChat(j.data.conversationHistory);
+          repopulateChat(j.data.conversationHistory, j.data.recap);
         }
         console.log("[session] Resumed:", existingId);
         return;
@@ -265,10 +265,35 @@ async function createNewSession(): Promise<string> {
 }
 
 /** Repopulate chat UI from conversation history */
-function repopulateChat(history: { role: string; content: string }[]): void {
+function repopulateChat(history: { role: string; content: string; timestamp?: number }[], recap?: string): void {
   const historyEl = document.getElementById("prompt-history");
   if (!historyEl) return;
   historyEl.innerHTML = "";
+
+  // Show restoration banner
+  if (history.length > 0) {
+    const timestamps = history.filter(m => m.timestamp).map(m => m.timestamp!);
+    const earliest = timestamps.length > 0 ? new Date(Math.min(...timestamps)) : null;
+    const bannerText = earliest
+      ? `📋 Session restored — ${history.length} messages from ${earliest.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`
+      : `📋 Session restored — ${history.length} messages`;
+    const banner = document.createElement("div");
+    banner.className = "session-restored-banner";
+    banner.textContent = bannerText;
+    historyEl.appendChild(banner);
+  }
+
+  // Show recap as system message
+  if (recap) {
+    const recapEl = document.createElement("div");
+    recapEl.className = "chat-entry session-recap";
+    const textEl = document.createElement("div");
+    textEl.className = "chat-text";
+    textEl.textContent = recap;
+    recapEl.appendChild(textEl);
+    historyEl.appendChild(recapEl);
+  }
+
   for (const msg of history) {
     if (msg.role === "user" || msg.role === "assistant") {
       appendChatEntry(msg.role as "user" | "assistant", msg.content);

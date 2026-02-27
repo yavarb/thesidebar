@@ -1,7 +1,7 @@
 import { setTrackChanges, isTrackChangesEnabled } from "./track-changes";
 import { runAgentLoop } from "./agent-loop";
 import { v4 as uuidv4 } from "uuid";
-import { saveSession, loadSession, deleteSession, cleanExpiredSessions, ensureMachineKey, SessionData } from "./sessions";
+import { saveSession, loadSession, deleteSession, cleanExpiredSessions, ensureMachineKey, SessionData, generateSessionRecap, searchConversationHistory } from "./sessions";
 import { getContextSize, manageContext } from "./context";
 import { resolveModel, cacheStats } from "./llm-router";
 import { readConfig } from "./settings";
@@ -47,7 +47,7 @@ const wss = new WebSocketServer({ server });
 /** Session ID for OpenClaw context persistence */
 let sessionId = "sidebar-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
 /** Conversation history for non-OpenClaw models */
-let conversationHistory: { role: string; content: string }[] = [];
+let conversationHistory: { role: string; content: string; timestamp?: number }[] = [];
 let currentSessionData: SessionData | null = null;
 // ── In-Memory Document Index ──
 let documentIndex: { paragraphs: {index: number, text: string, listString?: string}[], builtAt: number, hash: string } | null = null;
@@ -230,6 +230,16 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       systemPromptOverride = "You are a helpful assistant that can read and edit Word documents. Use the provided tools to interact with the document when needed." + folderHint;
     }
 
+
+    // Inject session recap if available
+    if (currentSessionData?.lastRecap) {
+      const recapAddendum = "\n\n## Previous Session Context\n" + currentSessionData.lastRecap + "\n\nThe full conversation history is available. The user may reference prior discussions.";
+      if (systemPromptOverride) {
+        systemPromptOverride += recapAddendum;
+      } else {
+        systemPromptOverride = "You are a helpful assistant that can read and edit Word documents. Use the provided tools to interact with the document when needed." + recapAddendum;
+      }
+    }
     for await (const chunk of runAgentLoop({
       prompt: fullPrompt,
       model,
@@ -264,15 +274,20 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     }
 
     // Track conversation history for non-OpenClaw models
-    conversationHistory.push({ role: "user", content: fullPrompt });
-    conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)" });
-    // Keep history bounded
-    if (conversationHistory.length > 40) conversationHistory = conversationHistory.slice(-20);
+    conversationHistory.push({ role: "user", content: fullPrompt, timestamp: Date.now() });
+    conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)", timestamp: Date.now() });
 
     // Auto-save session
     if (currentSessionData) {
       currentSessionData.conversationHistory = [...conversationHistory];
       currentSessionData.model = model;
+      // Store change summaries
+      if (changeSummaries.length > 0) {
+        if (!currentSessionData.changeSummaries) currentSessionData.changeSummaries = [];
+        for (const s of changeSummaries) {
+          currentSessionData.changeSummaries.push({ exchangeIndex: currentExchangeId, summary: s });
+        }
+      }
       saveSession(currentSessionData);
     }
 
@@ -648,8 +663,22 @@ app.post("/api/session/resume", (req, res) => {
   currentSessionData = data;
   conversationHistory = [...data.conversationHistory];
   sessionId = "sidebar-" + sid;
+  const recap = generateSessionRecap(data);
+  data.lastRecap = recap;
+  saveSession(data);
   console.log("[session] Resumed session:", sid, "("+data.conversationHistory.length+" messages)");
-  res.json({ ok: true, data: { found: true, conversationHistory: data.conversationHistory, model: data.model } });
+  res.json({ ok: true, data: { found: true, conversationHistory: data.conversationHistory, model: data.model, recap } });
+});
+
+
+
+
+app.post("/api/session/search", (req, res) => {
+  const { query } = req.body || {};
+  if (!query) return res.status(400).json({ ok: false, error: "query required" });
+  if (!currentSessionData) return res.json({ ok: true, data: { results: [], message: "No active session" } });
+  const results = searchConversationHistory(currentSessionData, query);
+  res.json({ ok: true, data: { results, count: results.length } });
 });
 
 app.post("/api/session/delete", (_req, res) => {

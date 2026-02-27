@@ -212,11 +212,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
 ];
 
+
+
 /**
  * Map from tool name to the API endpoint it calls.
  * The agentic loop uses this to execute tool calls.
  */
 export const TOOL_ENDPOINTS: Record<string, ToolEndpoint> = {
+  searchConversationHistory: { method: "POST", path: "/api/session/search", mapArgs: (args) => ({ path: "/api/session/search", body: { query: args.query } }) },
   readDocument: { method: "GET", path: "/api/document" },
   readParagraphs: {
     method: "GET",
