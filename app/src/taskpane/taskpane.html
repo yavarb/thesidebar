@@ -729,6 +729,45 @@
       color: white;
       border-color: var(--accent, #6366f1);
     }
+
+    /* ===== Reference Folders ===== */
+    .ref-folder-row {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 4px;
+      align-items: center;
+    }
+    .ref-folder-row input { flex: 1; }
+    .ref-status {
+      font-size: 11px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 8px;
+      transition: background 0.15s;
+      user-select: none;
+      position: relative;
+    }
+    .ref-status:hover { background: var(--bg-tertiary); }
+    .ref-status-popup {
+      display: none;
+      position: absolute;
+      bottom: 100%;
+      left: 0;
+      background: var(--settings-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 8px 10px;
+      min-width: 200px;
+      max-height: 200px;
+      overflow-y: auto;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      font-size: 11px;
+      z-index: 50;
+      margin-bottom: 4px;
+    }
+    .ref-status-popup.visible { display: block; }
+    .ref-status-popup .ref-file { padding: 2px 0; color: var(--text-primary); }
   </style>
 </head>
 <body>
@@ -776,6 +815,12 @@
           <button class="add-endpoint" id="settings-add-endpoint">+ Add endpoint</button>
         </div>
         <div class="settings-field">
+          <label>Reference Folders</label>
+          <div id="settings-reference-folders"></div>
+          <button class="add-endpoint" id="settings-add-folder">+ Add folder</button>
+          <div style="font-size:10px;color:var(--text-secondary);margin-top:4px;line-height:1.4;">Folders containing case documents (.docx, .pdf, .txt, .md). Files are automatically indexed for RAG retrieval.</div>
+        </div>
+        <div class="settings-field">
           <label>Default Model</label>
           <select id="settings-default-model">
             <option value="">Select model...</option>
@@ -807,6 +852,9 @@
           </select>
         </div>
         <button class="mode-toggle" id="mode-toggle" title="Toggle Track Changes">⚡ YOLO</button>
+        <span class="ref-status" id="ref-status" title="Reference documents" style="display:none;">📁 0 docs
+          <div class="ref-status-popup" id="ref-status-popup"></div>
+        </span>
       </div>
       <div class="textarea-wrap">
         <textarea id="prompt-input" rows="3" placeholder="Ask about your document..." autocomplete="off"></textarea>

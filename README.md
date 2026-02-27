@@ -34,11 +34,26 @@ You pick the model. You hold the keys. Nothing leaves your machine except the AP
 - Table manipulation
 - And more — the AI discovers available tools automatically
 
+### 📁 Reference Documents (RAG)
+- **Designate reference folders** — point The Sidebar at your case folders and every document becomes searchable context
+- **Automatic indexing** — recursively scans folders for .docx, .pdf, .txt, .md files. Re-indexes on changes every 5 minutes
+- **Smart retrieval** — embeds and retrieves only the most relevant chunks for each prompt (not the whole doc)
+- **Multiple embedding backends** — OpenAI `text-embedding-3-small`, local endpoints, or built-in TF-IDF fallback (works offline, zero API keys)
+- **OpenClaw-aware** — in OpenClaw mode, reference folders are passed as filesystem hints instead of RAG, letting the AI use its own judgment
+- **Multiple folders** — case documents in one folder, legal research in another
+
 ### 💬 Conversation
 - **Per-document sessions** — each document gets its own conversation thread
 - **Conversation history** — maintains context across exchanges within a session
 - **Revert system** — per-exchange undo. Don't like what the AI did? One click to roll it back
-- **Markdown rendering** — AI responses rendered with proper formatting
+- **Inline mini-diffs** — every edit shows a compact before/after summary right in the chat
+- **Markdown rendering** — AI responses rendered with proper formatting, code blocks, tables
+
+### ✏️ Editing Experience
+- **Track Changes / YOLO mode** — toggle between tracked changes (review each edit) and direct edits (fast, no tracking)
+- **Live progress** — watch the document scroll and update in real-time as the AI works
+- **Batch operations** — consecutive edits are batched for speed
+- **In-memory document index** — cached for fast repeated access, invalidated on edits
 
 ### 🖥️ App
 - **macOS menu bar app** — Electron tray app, starts on login

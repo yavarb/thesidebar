@@ -34,6 +34,8 @@ export interface SidebarConfig {
   contextBudgetPercent?: number;
   /** Session TTL in days. Default 30. 0 or -1 means forever. */
   sessionTTLDays?: number;
+  /** Reference folders for RAG document retrieval */
+  referenceFolders?: string[];
 }
 
 /** Sensitive field names that should be masked in GET responses */

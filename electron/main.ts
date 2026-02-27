@@ -345,6 +345,32 @@ function updateTrayMenu(): void {
     { label: "Open in Browser", enabled: serverRunning, click: () => shell.openExternal(`http://localhost:${SERVER_PORT}/api/status`) },
     { type: "separator" },
     { label: "Reinstall Word Add-in", click: () => { installWordAddin(); dialog.showMessageBox({ type: "info", title: "The Sidebar", message: "Add-in manifest reinstalled. Restart Word." }); } },
+    { label: "Set Reference Folders...", click: async () => {
+      const { filePaths } = await dialog.showOpenDialog({ properties: ["openDirectory", "multiSelections"], title: "Select Reference Document Folders" });
+      if (filePaths.length === 0) return;
+      // Read existing settings, merge folders
+      try {
+        const getReq = http.get(`http://localhost:${SERVER_PORT}/api/settings`, (res) => {
+          let body = ""; res.on("data", (c: Buffer) => body += c);
+          res.on("end", () => {
+            try {
+              const existing = JSON.parse(body)?.data?.referenceFolders || [];
+              const merged = [...new Set([...existing, ...filePaths])];
+              const postData = JSON.stringify({ referenceFolders: merged });
+              const postReq = http.request({ hostname: "127.0.0.1", port: SERVER_PORT, path: "/api/settings", method: "POST", headers: { "Content-Type": "application/json" } }, (res2) => {
+                let b2 = ""; res2.on("data", (c: Buffer) => b2 += c);
+                res2.on("end", () => {
+                  if (Notification.isSupported()) new Notification({ title: "The Sidebar", body: `Reference folders updated (${merged.length} folder${merged.length !== 1 ? "s" : ""}). Scanning...` }).show();
+                });
+              });
+              postReq.on("error", (e: Error) => dialog.showErrorBox("The Sidebar", "Failed: " + e.message));
+              postReq.write(postData); postReq.end();
+            } catch (e: any) { dialog.showErrorBox("The Sidebar", "Parse error: " + e.message); }
+          });
+        });
+        getReq.on("error", (e: Error) => dialog.showErrorBox("The Sidebar", "Failed: " + e.message));
+      } catch (e: any) { dialog.showErrorBox("The Sidebar", "Failed: " + e.message); }
+    }},
     { label: "Open Config Directory", click: () => shell.openPath(CONFIG_DIR) },
     { label: "Purge All Sessions…", click: async () => {
       const { response } = await dialog.showMessageBox({ type: "warning", title: "Purge All Sessions", message: "This will permanently delete all conversation history for all documents.", buttons: ["Cancel", "Purge All"], defaultId: 0, cancelId: 0 });

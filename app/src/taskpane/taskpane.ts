@@ -150,6 +150,7 @@ Office.onReady((info) => {
     void loadModels();
     setupSettingsUI();
     setupTrackChangesToggle();
+    setupRefStatus();
     connectWebSocket();
     // Initialize document session after WebSocket connects
     setTimeout(() => initSession(), 1000);
@@ -1276,6 +1277,16 @@ async function loadSettings(): Promise<void> {
     if (openaiKey) openaiKey.value = data.openaiApiKey || "";
     if (anthropicKey) anthropicKey.value = data.anthropicApiKey || "";
 
+    // Populate reference folders
+    const refContainer = document.getElementById("settings-reference-folders");
+    if (refContainer) {
+      refContainer.innerHTML = "";
+      const folders = data.referenceFolders || [];
+      for (const f of folders) {
+        addReferenceFolderRow(f);
+      }
+    }
+
     // Populate local endpoints
     const container = document.getElementById("settings-local-endpoints");
     if (container) {
@@ -1311,6 +1322,21 @@ function addLocalEndpointRow(name: string = "", baseUrl: string = ""): void {
   const removeBtn = row.querySelector(".remove-endpoint") as HTMLButtonElement;
   removeBtn.addEventListener("click", () => row.remove());
 
+  container.appendChild(row);
+}
+
+/** Add a reference folder row to the settings form */
+function addReferenceFolderRow(folderPath: string = ""): void {
+  const container = document.getElementById("settings-reference-folders");
+  if (!container) return;
+  const row = document.createElement("div");
+  row.className = "ref-folder-row";
+  row.innerHTML = `
+    <input type="text" placeholder="/path/to/case/folder" value="${escapeHtml(folderPath)}" class="ref-path" />
+    <button class="remove-endpoint" title="Remove">✕</button>
+  `;
+  const removeBtn = row.querySelector(".remove-endpoint") as HTMLButtonElement;
+  removeBtn.addEventListener("click", () => row.remove());
   container.appendChild(row);
 }
 
@@ -1416,7 +1442,20 @@ async function saveSettings(): Promise<boolean> {
     });
   }
 
+  // Collect reference folders
+  const referenceFolders: string[] = [];
+  const refContainer = document.getElementById("settings-reference-folders");
+  if (refContainer) {
+    const rows = refContainer.querySelectorAll(".ref-folder-row");
+    rows.forEach((row) => {
+      const p = (row.querySelector(".ref-path") as HTMLInputElement)?.value?.trim();
+      if (p) referenceFolders.push(p);
+    });
+  }
+
   const body: Record<string, any> = {};
+  if (referenceFolders.length > 0) body.referenceFolders = referenceFolders;
+  else body.referenceFolders = [];
   if (openclawUrl) body.openclawUrl = openclawUrl;
   if (openclawToken) body.openclawToken = openclawToken;
   if (openaiKey) body.openaiApiKey = openaiKey;
@@ -1477,6 +1516,11 @@ function setupSettingsUI(): void {
     addLocalEndpointRow();
   });
 
+  const addFolderBtn = document.getElementById("settings-add-folder");
+  addFolderBtn?.addEventListener("click", () => {
+    addReferenceFolderRow();
+  });
+
   // Test OpenClaw connection button
   const testBtn = document.getElementById("settings-test-openclaw");
   testBtn?.addEventListener("click", async () => {
@@ -1529,6 +1573,62 @@ function setupSettingsUI(): void {
       }
     }
   });
+}
+
+// ── Reference Status ──
+
+async function updateRefStatus(): Promise<void> {
+  const el = document.getElementById("ref-status");
+  if (!el) return;
+  try {
+    const r = await fetch("http://localhost:3001/api/references/status");
+    const j = await r.json();
+    if (j?.ok && j.data) {
+      const { documentCount, totalChunks, scanning: isScanning } = j.data;
+      if (documentCount > 0) {
+        el.style.display = "inline";
+        el.childNodes[0].textContent = `📁 ${documentCount} doc${documentCount !== 1 ? "s" : ""}${isScanning ? " ⟳" : ""} `;
+      } else {
+        el.style.display = "none";
+      }
+    }
+  } catch {}
+}
+
+async function showRefPopup(): Promise<void> {
+  const popup = document.getElementById("ref-status-popup");
+  if (!popup) return;
+  try {
+    const r = await fetch("http://localhost:3001/api/references");
+    const j = await r.json();
+    if (j?.ok && j.data?.documents) {
+      popup.innerHTML = j.data.documents.map((d: any) =>
+        `<div class="ref-file">📄 ${escapeHtml(d.filename)} (${d.chunkCount} chunks)</div>`
+      ).join("");
+      if (j.data.documents.length === 0) popup.innerHTML = "<div class="ref-file">No documents indexed</div>";
+    }
+  } catch {
+    popup.innerHTML = "<div class="ref-file">Unable to fetch</div>";
+  }
+}
+
+function setupRefStatus(): void {
+  const el = document.getElementById("ref-status");
+  if (!el) return;
+  el.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const popup = document.getElementById("ref-status-popup");
+    if (!popup) return;
+    const isVisible = popup.classList.contains("visible");
+    popup.classList.toggle("visible", !isVisible);
+    if (!isVisible) showRefPopup();
+  });
+  document.addEventListener("click", () => {
+    document.getElementById("ref-status-popup")?.classList.remove("visible");
+  });
+  // Poll every 30s
+  updateRefStatus();
+  setInterval(updateRefStatus, 30000);
 }
 
 // ── Track Changes / YOLO Mode ──

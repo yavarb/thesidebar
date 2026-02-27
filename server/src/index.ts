@@ -6,6 +6,7 @@ import { getContextSize, manageContext } from "./context";
 import { resolveModel, cacheStats } from "./llm-router";
 import { readConfig } from "./settings";
 import { handleGetSettings, handlePostSettings } from "./settings";
+import { queryDocuments, listDocuments as listRefDocs, getStatus as getRefStatus, rescan as rescanRefs, startPeriodicScan, stopPeriodicScan, getDocumentCount as getRefDocCount } from "./references";
 import express from "express";
 import compression from "compression";
 import cors from "cors";
@@ -156,6 +157,37 @@ async function processPrompt(entry: PromptEntry, ws: any) {
 
     const model = entry.model || config.defaultModel || "openclaw";
 
+    // ── Reference Documents (RAG) ──
+    const isOpenClawModel = !model.startsWith("openai:") && !model.startsWith("anthropic:") && !model.startsWith("local:");
+    const referenceFolders = config.referenceFolders || [];
+    let referenceContext = "";
+
+    if (referenceFolders.length > 0 && !isOpenClawModel) {
+      // RAG retrieval for direct API models
+      try {
+        const refResults = await queryDocuments(entry.text, 5);
+        if (refResults.length > 0) {
+          referenceContext = "
+
+## Reference Documents
+
+";
+          for (const r of refResults) {
+            referenceContext += `From "${r.filename}" (relevance: ${r.score.toFixed(2)}):
+${r.chunkText}
+
+`;
+          }
+        }
+      } catch (e: any) {
+        console.error("[agent] Reference query failed:", e.message);
+      }
+    }
+
+    if (referenceFolders.length > 0 && referenceContext) {
+      documentContext += referenceContext;
+    }
+
     // Build prompt with context
     let fullPrompt = entry.text;
     if (entry.context) {
@@ -194,11 +226,28 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     let modifyingCallCount = 0;
     let fullResponse = "";
     let changeSummaries: string[] = [];
+    // Build systemPrompt override for OpenClaw with reference folders
+    let systemPromptOverride: string | undefined;
+    if (isOpenClawModel && referenceFolders.length > 0) {
+      systemPromptOverride = "";
+      systemPromptOverride += "
+
+The user has designated the following reference folders for this case:
+";
+      for (const folder of referenceFolders) {
+        systemPromptOverride += `- ${folder}
+`;
+      }
+      systemPromptOverride += "
+Prioritize these folders when searching for documents, exhibits, or supporting materials. You have full filesystem access — use it to read relevant files directly when the user's question relates to other documents.";
+    }
+
     for await (const chunk of runAgentLoop({
       prompt: fullPrompt,
       model,
       config: routerConfig,
       documentContext,
+      systemPrompt: systemPromptOverride,
       sessionUser: isOpenClaw ? sessionId : undefined,
       conversationHistory: !isOpenClaw ? managedHistory : undefined,
       onToolCall: (call) => {
@@ -331,6 +380,7 @@ const heartbeatInterval = setInterval(() => {
 function shutdown() {
   console.log("[thesidebar] Shutting down...");
   clearInterval(heartbeatInterval);
+  stopPeriodicScan();
   if (taskPaneWs) taskPaneWs.close(1001, "Server shutting down");
   for (const [id, p] of pending) { clearTimeout(p.timer); p.reject(new Error("Shutting down")); pending.delete(id); }
   server.close(() => process.exit(0));
@@ -444,6 +494,10 @@ app.get("/api/help", (_req, res) => {
     { m: "POST", p: "/api/undo", d: "Undo last edit" },
     { m: "GET", p: "/api/undo/history", d: "Undo stack" },
     { m: "POST", p: "/api/batch", d: "Batch operations" },
+    { m: "GET", p: "/api/references", d: "List reference docs + status" },
+    { m: "GET", p: "/api/references/status", d: "Reference index status" },
+    { m: "POST", p: "/api/references/rescan", d: "Trigger folder rescan" },
+    { m: "POST", p: "/api/references/query", d: "Query reference chunks" },
   ]}});
 });
 
@@ -654,11 +708,21 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`\n  🎀 The Sidebar Server v${VERSION}`);
   console.log(`  ${"🌐 HTTP (localhost)"} on port ${PORT}`);
   console.log(`  📡 WebSocket waiting for connections...\n`);
+
+  // Start reference document folder scanning
+  startPeriodicScan();
 });
 
 // ── Settings ──
 app.get("/api/settings", handleGetSettings());
-app.post("/api/settings", handlePostSettings());
+app.post("/api/settings", (req, res, next) => {
+  // Wrap handlePostSettings to trigger rescan when referenceFolders change
+  const handler = handlePostSettings();
+  handler(req, res);
+  if (req.body?.referenceFolders !== undefined) {
+    rescanRefs().catch(e => console.error("[references] Rescan after settings change failed:", e.message));
+  }
+});
 
 
 app.post("/api/settings/mode", (req, res) => {
@@ -730,6 +794,35 @@ app.post("/api/export/pdf", async (req, res) => {
     }
   } catch (e: any) {
     res.status(500).json({ ok: false, error: `PDF export failed: ${e.message}` });
+  }
+});
+
+// ── Reference Documents ──
+app.get("/api/references", (_req, res) => {
+  res.json({ ok: true, data: { documents: listRefDocs(), status: getRefStatus() } });
+});
+
+app.get("/api/references/status", (_req, res) => {
+  res.json({ ok: true, data: getRefStatus() });
+});
+
+app.post("/api/references/rescan", async (_req, res) => {
+  try {
+    const result = await rescanRefs();
+    res.json({ ok: true, data: result });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/references/query", async (req, res) => {
+  const { text, topK } = req.body || {};
+  if (!text) return res.status(400).json({ ok: false, error: "text required" });
+  try {
+    const results = await queryDocuments(text, topK || 5);
+    res.json({ ok: true, data: results });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
