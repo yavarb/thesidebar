@@ -1,3 +1,16 @@
+import { marked } from "marked";
+
+// Configure marked for safe rendering
+marked.setOptions({ breaks: true, gfm: true });
+
+function renderMarkdown(text: string): string {
+  try {
+    return marked.parse(text) as string;
+  } catch {
+    return text;
+  }
+}
+
 /* global Office, Word */
 
 // ── Config ──
@@ -95,7 +108,11 @@ function appendChatEntry(role: "user" | "assistant", text: string, status?: stri
   roleEl.textContent = role === "user" ? "You" : "OpenClaw";
   const textEl = document.createElement("div");
   textEl.className = "chat-text";
-  textEl.textContent = text;
+  if (role === "assistant") {
+    textEl.innerHTML = renderMarkdown(text);
+  } else {
+    textEl.textContent = text;
+  }
   el.appendChild(roleEl);
   el.appendChild(textEl);
   if (status) {
@@ -180,6 +197,22 @@ function setupPromptUI() {
 
   btn.addEventListener("click", sendPrompt);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPrompt(); } });
+
+  // New Chat button
+  const newChatBtn = document.getElementById("new-chat-btn");
+  if (newChatBtn) {
+    newChatBtn.addEventListener("click", async () => {
+      try {
+        await fetch("http://localhost:3001/api/session/new", { method: "POST" });
+      } catch (e) {
+        console.error("Failed to reset session:", e);
+      }
+      // Clear chat UI
+      const history = document.getElementById("prompt-history");
+      if (history) history.innerHTML = "";
+      pendingPromptEls.clear();
+    });
+  }
 }
 
 // ── WebSocket ──
@@ -261,7 +294,7 @@ function connectWebSocket() {
           roleEl.textContent = "Assistant";
           const textEl = document.createElement("div");
           textEl.className = "chat-text";
-          textEl.textContent = progressText;
+          textEl.innerHTML = renderMarkdown(progressText);
           streamEl.appendChild(roleEl);
           streamEl.appendChild(textEl);
           const userEl = history.querySelector(`[data-prompt-id="${promptId}"]`) as HTMLElement | null;
@@ -269,7 +302,7 @@ function connectWebSocket() {
           else history.appendChild(streamEl);
         } else {
           const textEl = streamEl.querySelector(".chat-text") as HTMLElement;
-          if (textEl) textEl.textContent = progressText;
+          if (textEl) textEl.innerHTML = renderMarkdown(progressText);
         }
         history.scrollTop = history.scrollHeight;
         return;
@@ -297,7 +330,7 @@ function connectWebSocket() {
             roleEl.textContent = "OpenClaw";
             const textEl = document.createElement("div");
             textEl.className = "chat-text";
-            textEl.textContent = responseText;
+            textEl.innerHTML = renderMarkdown(responseText);
             el.appendChild(roleEl);
             el.appendChild(textEl);
             userEl.insertAdjacentElement("afterend", el);

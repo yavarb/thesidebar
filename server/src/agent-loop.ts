@@ -61,6 +61,10 @@ export interface AgentLoopOptions {
   onToolCall?: (call: ToolCall) => void;
   /** Callback for tool results */
   onToolResult?: (result: ToolResult) => void;
+  /** Session user ID for OpenClaw context persistence */
+  sessionUser?: string;
+  /** Conversation history for non-OpenClaw models */
+  conversationHistory?: { role: string; content: string }[];
 }
 
 // ── Tool Execution ──
@@ -232,10 +236,19 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
     maxIterations = MAX_ITERATIONS,
     onToolCall,
     onToolResult,
+    sessionUser,
+    conversationHistory: priorHistory,
   } = options;
 
   // Build conversation history for multi-turn
   const messages: Array<{ role: "user" | "assistant" | "system"; content: string }> = [];
+
+  // Prepend prior conversation history if provided (for non-OpenClaw models)
+  if (priorHistory?.length) {
+    for (const msg of priorHistory) {
+      messages.push({ role: msg.role as "user" | "assistant", content: msg.content });
+    }
+  }
 
   // Initial context
   const context: PromptContext = {
@@ -243,6 +256,7 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
     documentContext,
     tools: TOOL_DEFINITIONS,
     messages,
+    sessionUser,
   };
 
   let currentPrompt = prompt;

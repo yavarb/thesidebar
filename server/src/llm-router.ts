@@ -60,6 +60,8 @@ export interface PromptContext {
   messages?: Array<{ role: "user" | "assistant" | "system"; content: string }>;
   /** Tool definitions (OpenAI function-calling format) */
   tools?: any[];
+  /** Session user ID for OpenClaw context persistence */
+  sessionUser?: string;
 }
 
 // ── Helpers ──
@@ -143,9 +145,10 @@ export async function* routeOpenClaw(
   messages.push({ role: "user", content: prompt });
 
   const body: any = { model: `openclaw:main`, messages, stream: true };
+  if (context.sessionUser) body.user = context.sessionUser;
   if (context.tools?.length) body.tools = context.tools;
 
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = { "Content-Type": "application/json", "x-openclaw-agent-id": "main" };
 
   // Add auth token if configured
   if (config.openclawToken) {

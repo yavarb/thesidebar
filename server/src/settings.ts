@@ -30,6 +30,8 @@ export interface SidebarConfig {
   localEndpoints?: LocalEndpointConfig[];
   /** Default model string */
   defaultModel?: string;
+  /** Percentage of context window to use for conversation history (default 40) */
+  contextBudgetPercent?: number;
 }
 
 /** Sensitive field names that should be masked in GET responses */

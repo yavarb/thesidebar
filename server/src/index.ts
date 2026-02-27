@@ -1,4 +1,6 @@
 import { runAgentLoop } from "./agent-loop";
+import { getContextSize, manageContext } from "./context";
+import { resolveModel } from "./llm-router";
 import { readConfig } from "./settings";
 import { handleGetSettings, handlePostSettings } from "./settings";
 import express from "express";
@@ -38,6 +40,11 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 // ── State ──
+/** Session ID for OpenClaw context persistence */
+let sessionId = "sidebar-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+/** Conversation history for non-OpenClaw models */
+let conversationHistory: { role: string; content: string }[] = [];
+
 /** Single task pane WebSocket connection (localhost only) */
 let taskPaneWs: WebSocket | null = null;
 let globalRequestId = 0;
@@ -81,6 +88,33 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       fullPrompt = `[Selected text: ${entry.context}]\n\n${entry.text}`;
     }
 
+    // Determine backend for conversation history strategy
+    // For non-OpenClaw: manage context window
+    let managedHistory: { role: string; content: string }[] | undefined;
+    const isOpenClaw = !model.startsWith("openai:") && !model.startsWith("anthropic:") && !model.startsWith("local:");
+
+    if (!isOpenClaw) {
+      // No context management needed — OpenClaw handles its own sessions
+    } else {
+      // This branch is dead (isOpenClaw is true) — managedHistory stays undefined
+    }
+
+    if (!isOpenClaw && conversationHistory.length > 0) {
+      const spec = resolveModel(model, routerConfig);
+      const ctxConfig = {
+        openaiApiKey: config.openaiApiKey,
+        anthropicApiKey: config.anthropicApiKey,
+        localBaseUrl: spec.baseUrl,
+      };
+      const contextSize = await getContextSize(spec.backend, spec.modelId, ctxConfig);
+      const budgetPercent = config.contextBudgetPercent ?? 40;
+      const managed = manageContext(conversationHistory, contextSize, documentContext, budgetPercent);
+      managedHistory = managed.messages;
+      if (managed.compactedCount > 0) {
+        console.log(`[context] Compacted ${managed.compactedCount} messages, ~${managed.estimatedTokens} tokens used (budget: ${Math.floor(contextSize * budgetPercent / 100)})`);
+      }
+    }
+
     // Run agent loop and stream results
     let fullResponse = "";
     for await (const chunk of runAgentLoop({
@@ -88,6 +122,8 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       model,
       config: routerConfig,
       documentContext,
+      sessionUser: isOpenClaw ? sessionId : undefined,
+      conversationHistory: !isOpenClaw ? managedHistory : undefined,
       onToolCall: (call) => {
         if (ws.readyState === 1) {
           ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: `Using tool: ${call.name}...` }));
@@ -99,6 +135,12 @@ async function processPrompt(entry: PromptEntry, ws: any) {
         ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: fullResponse }));
       }
     }
+
+    // Track conversation history for non-OpenClaw models
+    conversationHistory.push({ role: "user", content: fullPrompt });
+    conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)" });
+    // Keep history bounded
+    if (conversationHistory.length > 40) conversationHistory = conversationHistory.slice(-20);
 
     // Send final response
     if (ws.readyState === 1) {
@@ -375,6 +417,14 @@ app.post("/api/track-changes", apiHandler("trackChanges"));
 app.post("/api/batch", apiHandler("batch"));
 
 // Start
+// ── Session Management ──
+app.post("/api/session/new", (_req, res) => {
+  sessionId = "sidebar-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+  conversationHistory = [];
+  console.log("[session] New session:", sessionId);
+  res.json({ ok: true, data: { sessionId } });
+});
+
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`\n  🎀 The Sidebar Server v${VERSION}`);
   console.log(`  ${"🌐 HTTP (localhost)"} on port ${PORT}`);
