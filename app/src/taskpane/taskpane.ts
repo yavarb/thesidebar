@@ -2644,7 +2644,7 @@ const QUICK_ACTIONS_DEFAULTS: QuickActionCategory[] = [
     actions: [
       { name: "Check Bluebook", prompt: "Review all citations in this document for Bluebook formatting errors. List each error with the paragraph number, the incorrect citation, and the corrected version." },
       { name: "Long/Short Cites", prompt: "Check that every short citation in this document has a corresponding full citation earlier in the document. Flag any short cites that don't match a prior long cite, and any long cites that are repeated unnecessarily." },
-      { name: "TOA Pages", prompt: "Audit the Table of Authorities using fuzzy legal judgment (not deterministic string matching). Compare each TOA entry's listed pages against where that authority appears to be cited in the brief body and footnotes. Handle citation variants (short cites, reporter abbreviations, party-name variants, supra/infra references, punctuation differences, wrapped lines).\n\nOutput three sections:\n1) High-confidence TOA page errors\n2) Medium-confidence possible mismatches\n3) Needs manual review\n\nFor each flagged entry use this format (NOT a table — tables don't render well in narrow panels):\n\n**Authority name**\n- TOA pages: X, Y \u2192 Actual: X, Z\n- Confidence: High/Medium\n- Rationale: brief explanation\n\nKeep it compact. Use bold for authority names, bullet lists for details." },
+      { name: "TOA Pages", prompt: "__DIRECT_ACTION__checkToaPages" },
       { name: "Find Uncited", prompt: "Identify any factual assertions in this document that lack a supporting citation or footnote." },
     ]
   },
@@ -2738,79 +2738,91 @@ async function runDirectAction(action: string, displayLabel: string): Promise<vo
   // Show user message
   appendChatEntry("user", displayLabel);
 
-  // Show progress
-  const progressEl = document.createElement("div");
-  progressEl.className = "chat-entry chat-assistant";
-  const roleEl = document.createElement("div");
-  roleEl.className = "chat-role";
-  roleEl.textContent = "The Sidebar";
-  const textEl = document.createElement("div");
-  textEl.className = "chat-text streaming-cursor";
-  textEl.textContent = "⚖️ Exporting document to PDF and checking page numbers...";
-  progressEl.appendChild(roleEl);
-  progressEl.appendChild(textEl);
-  history.appendChild(progressEl);
-  history.scrollTo({ top: history.scrollHeight, behavior: "smooth" });
+  if (action === "checkToaPages") {
+    // Phase 1: Export PDF and get page map
+    addThinkingIndicator();
+    const thinkingEl = document.getElementById("thinking-indicator");
+    const elapsed = thinkingEl?.querySelector(".thinking-elapsed") as HTMLElement | null;
 
-  try {
-    const res = await fetch(`http://localhost:3001/api/toa/check`, { method: "POST" });
-    const raw = await res.json();
-    const payload = raw?.data ?? raw;
+    try {
+      // Update status
+      if (elapsed) elapsed.textContent = "Exporting PDF...";
 
-    if (!raw?.ok && (raw?.error || payload?.error)) {
-      textEl.classList.remove("streaming-cursor");
-      textEl.innerHTML = `<strong>Error:</strong> ${raw?.error || payload?.error}`;
-      return;
-    }
+      const res = await fetch("http://localhost:3001/api/toa/check", { method: "POST" });
+      const raw = await res.json();
+      const payload = raw?.data ?? raw;
 
-    const results = payload?.results || [];
-    const totalEntries = payload?.totalEntries ?? results.length;
-
-    if (!totalEntries) {
-      textEl.classList.remove("streaming-cursor");
-      textEl.innerHTML = `<strong>TOA check couldn't run:</strong> No TOA entries were detected. Make sure the document has a populated Table of Authorities section.`;
-      return;
-    }
-
-    let html = `<strong>Table of Authorities Check</strong><br>`;
-    html += `<span style="font-size:11px;opacity:0.7">${totalEntries} entries checked</span><br><br>`;
-
-    const correct = results.filter((r: any) => r.status === "correct");
-    const incorrect = results.filter((r: any) => r.status === "incorrect");
-    const notFound = results.filter((r: any) => r.status === "not_found");
-    const passim = results.filter((r: any) => r.status === "passim");
-
-    if (incorrect.length === 0 && notFound.length === 0) {
-      html += `✅ <strong>All page numbers are correct!</strong><br>`;
-      html += `${correct.length} correct, ${passim.length} passim`;
-    } else {
-      if (incorrect.length > 0) {
-        html += `❌ <strong>${incorrect.length} incorrect:</strong><br>`;
-        for (const r of incorrect) {
-          html += `<div style="margin:4px 0 4px 8px;font-size:12px">• <em>${r.entry.substring(0, 60)}${r.entry.length > 60 ? "..." : ""}</em><br>`;
-          html += `&nbsp;&nbsp;Listed: <strong>${r.listedPages}</strong> → Actual: <strong>${r.actualPages.join(", ")}</strong>`;
-          if (r.details) html += `<br>&nbsp;&nbsp;<span style="opacity:0.7">${r.details}</span>`;
-          html += `</div>`;
-        }
+      if (!raw?.ok || !payload?.pageMap) {
+        removeThinkingIndicator();
+        appendChatEntry("assistant", raw?.error || "Failed to export PDF and extract pages.");
+        return;
       }
-      if (notFound.length > 0) {
-        html += `<br>⚠️ <strong>${notFound.length} not found in document:</strong><br>`;
-        for (const r of notFound) {
-          html += `<div style="margin:4px 0 4px 8px;font-size:12px">• <em>${r.entry.substring(0, 60)}${r.entry.length > 60 ? "..." : ""}</em></div>`;
-        }
-      }
-      if (correct.length > 0) html += `<br>✅ ${correct.length} correct`;
-      if (passim.length > 0) html += `, ${passim.length} passim`;
-    }
 
-    textEl.classList.remove("streaming-cursor");
-    textEl.innerHTML = html;
-  } catch (e: any) {
-    textEl.classList.remove("streaming-cursor");
-    textEl.innerHTML = `<strong>Error:</strong> ${e.message || "Failed to check TOA"}`;
+      if (elapsed) elapsed.textContent = "Sending to AI for analysis...";
+
+      // Phase 2: Build prompt with REAL page data and send to LLM
+      const toaList = payload.toaEntries.map((e: any) => `  - ${e.text} → listed pages: ${e.pages}`).join("\n");
+
+      const pageMapText = payload.pageMap.map((p: any) =>
+        `--- PAGE ${p.page} ---\n${p.text}`
+      ).join("\n\n");
+
+      const prompt = `You are auditing a Table of Authorities (TOA) for a legal brief.
+
+Below are the TOA entries with their LISTED page numbers, followed by the ACTUAL document text organized by REAL page number (extracted from a PDF export of the document).
+
+Your task: For each TOA entry, find where that authority is actually cited in the document body (using the page-mapped text below), and compare the REAL page numbers against the LISTED page numbers in the TOA.
+
+Handle citation variants: short cites, supra/infra references, party-name-only references, different reporter formats.
+
+IMPORTANT: The page numbers in the page map below are REAL document page numbers from the PDF. Use ONLY these to determine actual pages. Do NOT guess or infer page numbers from section headings or TOC entries.
+
+## TOA Entries (with listed pages):
+${toaList}
+
+## Document Text by Page:
+${pageMapText}
+
+## Output Format (use bullet lists, NOT tables):
+
+**1) High-Confidence Errors**
+For each:
+**Authority name**
+- TOA lists: X, Y → Actually on: X, Z
+- Confidence: High
+- Rationale: one sentence
+
+**2) Possible Mismatches (Medium Confidence)**
+Same format
+
+**3) Entries That Appear Correct**
+Brief list
+
+**4) Could Not Verify**
+Entries where the citation wasn't found in the body text
+
+Keep it compact. Be precise about page numbers.`;
+
+      // Send to LLM via the normal prompt mechanism
+      const input = document.getElementById("prompt-input") as HTMLTextAreaElement;
+      if (input) {
+        removeThinkingIndicator();
+        input.value = prompt;
+        (input as any)._displayLabel = "Analyzing TOA with real page data...";
+        const sendBtn = document.getElementById("prompt-send") as HTMLButtonElement;
+        sendBtn?.click();
+      }
+    } catch (e: any) {
+      removeThinkingIndicator();
+      appendChatEntry("assistant", "Error: " + (e.message || "TOA check failed"));
+    }
+    return;
   }
-  history.scrollTo({ top: history.scrollHeight, behavior: "smooth" });
+
+  // Generic direct action fallback
+  appendChatEntry("assistant", "Unknown direct action: " + action);
 }
+
 
 async function executeQuickAction(prompt: string, displayLabel?: string): Promise<void> {
   // Handle direct server actions (no LLM needed)

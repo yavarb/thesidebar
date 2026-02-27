@@ -1023,7 +1023,35 @@ app.post("/api/paragraph/diff", apiHandler("diffParagraph"));
 // ── TOA Page Check ──
 app.post("/api/toa/check", async (_req, res) => {
   try {
+    // Step 1: Get TOA entries from document
     const toaResult = await sendCommand("getToaEntries", {});
+    if (!toaResult.entries?.length) return res.json({ ok: false, error: "No TOA entries found in document. Make sure there is a Table of Authorities section." });
+
+    // Step 2: Export PDF and parse page-to-text mapping
+    const pdfResult = await sendCommand("exportPdf", {});
+    if (pdfResult.error || !pdfResult.pdf) return res.json({ ok: false, error: "PDF export failed: " + (pdfResult.error || "no data") });
+
+    const pages = await parsePageContent(pdfResult.pdf);
+    if (!pages.length) return res.json({ ok: false, error: "Could not extract any pages from PDF" });
+
+    // Step 3: Build page map summary for LLM (text snippet per page)
+    const pageMap = pages.map(p => ({
+      page: p.pageNumber,
+      // Truncate each page to ~2000 chars to keep context manageable
+      text: p.text.substring(0, 2000) + (p.text.length > 2000 ? "..." : "")
+    }));
+
+    // Step 4: Return everything — let the caller send to LLM
+    res.json({
+      ok: true,
+      data: {
+        toaEntries: toaResult.entries,
+        pageCount: pages.length,
+        pageMap,
+      }
+    });
+  } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
+})
     if (!toaResult.entries?.length) return res.json({ ok: false, error: "No TOA entries found" });
     const pdfResult = await sendCommand("exportPdf", {});
     if (pdfResult.error || !pdfResult.pdf) return res.json({ ok: false, error: "PDF export failed: " + (pdfResult.error || "no data") });
