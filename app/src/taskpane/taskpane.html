@@ -153,6 +153,33 @@
       overflow: hidden;
     }
 
+
+    /* ===== Chat Tables ===== */
+    .chat-text table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+      margin: 8px 0;
+      table-layout: auto;
+    }
+    .chat-text table th,
+    .chat-text table td {
+      padding: 4px 6px;
+      border: 1px solid var(--border-color);
+      text-align: left;
+      vertical-align: top;
+      word-wrap: break-word;
+    }
+    .chat-text table th {
+      background: var(--bg-secondary);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    /* If table is too wide, make it scrollable */
+    .chat-text .table-wrapper {
+      overflow-x: auto;
+      margin: 8px 0;
+    }
     /* ===== Header ===== */
     .header {
       display: flex;
