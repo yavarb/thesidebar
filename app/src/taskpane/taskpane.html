@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Sidebar</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; padding: 12px; background: #f8f8f8; font-size: 13px; }
+    h2 { font-size: 15px; margin: 0 0 8px; color: #333; }
+    .status-ok { color: #2d7d2d; font-weight: 600; }
+    .status-err { color: #c33; font-weight: 600; }
+    #app-body { display: none; flex-direction: column; gap: 10px; height: calc(100vh - 24px); }
+    .meta { display: flex; justify-content: space-between; align-items: center; }
+    .meta .info { font-size: 11px; color: #888; }
+    /* Prompt section */
+    .prompt-section { border-top: 1px solid #ddd; padding-top: 10px; }
+    .prompt-section h3 { font-size: 12px; margin: 0 0 6px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; }
+    .prompt-row { display: flex; gap: 6px; align-items: center; }
+    .prompt-row input { flex: 1; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; outline: none; }
+    .prompt-row select { width: 130px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; background: #fff; }
+    .prompt-row input:focus { border-color: #0078d4; }
+    .prompt-row button { padding: 6px 12px; background: #0078d4; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
+    .prompt-row button:hover { background: #106ebe; }
+    /* Prompt conversation */
+    #prompt-history { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding-top: 8px; }
+    .chat-entry { background: #fff; border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+    .chat-user { border-left: 3px solid #0078d4; }
+    .chat-assistant { border-left: 3px solid #5b9b5b; }
+    .chat-role { font-size: 11px; font-weight: 700; text-transform: uppercase; color: #666; margin-bottom: 4px; letter-spacing: 0.3px; }
+    .chat-text { color: #222; white-space: pre-wrap; line-height: 1.35; }
+    .chat-status { margin-top: 4px; font-size: 10px; color: #888; }
+
+    /* Settings panel */
+    .settings-gear { cursor: pointer; font-size: 16px; margin-left: 8px; opacity: 0.6; transition: opacity 0.2s; user-select: none; }
+    .settings-gear:hover { opacity: 1; }
+    #settings-panel { display: none; background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    #settings-panel.visible { display: block; }
+    #settings-panel h3 { font-size: 13px; margin: 0 0 10px; color: #333; }
+    .settings-field { margin-bottom: 10px; }
+    .settings-field label { display: block; font-size: 11px; font-weight: 600; color: #555; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.3px; }
+    .settings-field input, .settings-field select { width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; outline: none; }
+    .settings-field input:focus { border-color: #0078d4; }
+    .settings-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 12px; }
+    .settings-actions button { padding: 6px 14px; border: none; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; }
+    .settings-actions .btn-save { background: #0078d4; color: #fff; }
+    .settings-actions .btn-save:hover { background: #106ebe; }
+    .settings-actions .btn-cancel { background: #e8e8e8; color: #333; }
+    .settings-actions .btn-cancel:hover { background: #d0d0d0; }
+    .settings-status { font-size: 11px; color: #2d7d2d; margin-top: 6px; display: none; }
+    .settings-status.error { color: #c33; }
+    .local-endpoint { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
+    .local-endpoint input { flex: 1; }
+    .local-endpoint .remove-endpoint { background: none; border: none; color: #c33; cursor: pointer; font-size: 14px; padding: 2px 6px; }
+    .add-endpoint { font-size: 11px; color: #0078d4; cursor: pointer; border: none; background: none; padding: 2px 0; }
+    .add-endpoint:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div id="sideload-msg">
+    <p>Please sideload the add-in to see it in action.</p>
+  </div>
+  <div id="app-body">
+    <div class="meta">
+      <h2>⚖️ The Sidebar</h2>
+      <span class="info" id="pane-name">—</span>
+      <span class="settings-gear" id="settings-toggle" title="Settings">⚙️</span>
+    </div>
+    <p style="margin:0;">Status: <span id="status" class="status-err">Connecting...</span></p>
+    
+
+    <div id="settings-panel">
+      <h3>⚙️ Settings</h3>
+      <div class="settings-field">
+        <label>OpenClaw URL</label>
+        <input id="settings-openclaw-url" type="text" placeholder="https://localhost:3001" />
+      </div>
+      <div class="settings-field">
+        <label>OpenAI API Key</label>
+        <input id="settings-openai-key" type="password" placeholder="sk-..." />
+      </div>
+      <div class="settings-field">
+        <label>Anthropic API Key</label>
+        <input id="settings-anthropic-key" type="password" placeholder="sk-ant-..." />
+      </div>
+      <div class="settings-field">
+        <label>Local Endpoints</label>
+        <div id="settings-local-endpoints"></div>
+        <button class="add-endpoint" id="settings-add-endpoint">+ Add endpoint</button>
+      </div>
+      <div class="settings-field">
+        <label>Default Model</label>
+        <select id="settings-default-model">
+          <option value="">Select model...</option>
+        </select>
+      </div>
+      <div class="settings-actions">
+        <button class="btn-cancel" id="settings-cancel">Cancel</button>
+        <button class="btn-save" id="settings-save">Save</button>
+      </div>
+      <div class="settings-status" id="settings-status"></div>
+    </div>
+    
+    <div class="prompt-section">
+      <h3>Prompt</h3>
+      <div class="prompt-row">
+        <select id="model-select" title="Model">
+          <option value="">Model…</option>
+        </select>
+        <input id="prompt-input" type="text" placeholder="Type a prompt..." autocomplete="off" />
+        <button id="prompt-send">Send</button>
+      </div>
+    </div>
+    
+    <div id="prompt-history" aria-live="polite"></div>
+  </div>
+</body>
+</html>

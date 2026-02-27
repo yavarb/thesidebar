@@ -1,0 +1,37 @@
+{
+  "name": "thesidebar",
+  "version": "0.1.0",
+  "description": "The Sidebar — AI-powered legal writing assistant for Microsoft Word",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yavarb/thesidebar.git"
+  },
+  "author": "Yavar Bathaee",
+  "scripts": {
+    "build": "npm run build:server && npm run build:app",
+    "build:server": "cd server && npm run build",
+    "build:app": "cd app && npm run build",
+    "dev": "cd server && npm run dev",
+    "start": "cd server && npm start",
+    "test": "cd server && npm test",
+    "install:all": "npm install && cd server && npm install && cd ../app && npm install && cd ../electron && npm install"
+  },
+  "build": {
+    "appId": "com.thesidebar.app",
+    "productName": "The Sidebar",
+    "mac": {
+      "category": "public.app-category.productivity"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "yavarb",
+        "repo": "thesidebar"
+      }
+    ]
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
