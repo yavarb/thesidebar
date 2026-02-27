@@ -1605,10 +1605,10 @@ async function showRefPopup(): Promise<void> {
       popup.innerHTML = j.data.documents.map((d: any) =>
         `<div class="ref-file">📄 ${escapeHtml(d.filename)} (${d.chunkCount} chunks)</div>`
       ).join("");
-      if (j.data.documents.length === 0) popup.innerHTML = "<div class="ref-file">No documents indexed</div>";
+      if (j.data.documents.length === 0) popup.innerHTML = "<div class=\"ref-file\">No documents indexed</div>";
     }
   } catch {
-    popup.innerHTML = "<div class="ref-file">Unable to fetch</div>";
+    popup.innerHTML = "<div class=\"ref-file\">Unable to fetch</div>";
   }
 }
 

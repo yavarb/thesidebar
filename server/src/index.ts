@@ -167,16 +167,9 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       try {
         const refResults = await queryDocuments(entry.text, 5);
         if (refResults.length > 0) {
-          referenceContext = "
-
-## Reference Documents
-
-";
+          referenceContext = "\n\n## Reference Documents\n\n";
           for (const r of refResults) {
-            referenceContext += `From "${r.filename}" (relevance: ${r.score.toFixed(2)}):
-${r.chunkText}
-
-`;
+            referenceContext += `From "${r.filename}" (relevance: ${r.score.toFixed(2)}):\n${r.chunkText}\n\n`;
           }
         }
       } catch (e: any) {
@@ -226,20 +219,15 @@ ${r.chunkText}
     let modifyingCallCount = 0;
     let fullResponse = "";
     let changeSummaries: string[] = [];
-    // Build systemPrompt override for OpenClaw with reference folders
+    // Build systemPrompt addendum for OpenClaw with reference folders
     let systemPromptOverride: string | undefined;
     if (isOpenClawModel && referenceFolders.length > 0) {
-      systemPromptOverride = "";
-      systemPromptOverride += "
-
-The user has designated the following reference folders for this case:
-";
+      let folderHint = "\n\nThe user has designated the following reference folders for this case:\n";
       for (const folder of referenceFolders) {
-        systemPromptOverride += `- ${folder}
-`;
+        folderHint += `- ${folder}\n`;
       }
-      systemPromptOverride += "
-Prioritize these folders when searching for documents, exhibits, or supporting materials. You have full filesystem access — use it to read relevant files directly when the user's question relates to other documents.";
+      folderHint += "\nPrioritize these folders when searching for documents, exhibits, or supporting materials. You have full filesystem access — use it to read relevant files directly when the user\'s question relates to other documents.";
+      systemPromptOverride = "You are a helpful assistant that can read and edit Word documents. Use the provided tools to interact with the document when needed." + folderHint;
     }
 
     for await (const chunk of runAgentLoop({
