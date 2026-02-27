@@ -269,7 +269,11 @@ async function processPrompt(entry: PromptEntry, ws: any) {
         folderHint += `- ${folder}\n`;
       }
       folderHint += "\nPrioritize these folders when searching for documents, exhibits, or supporting materials. You have full filesystem access — use it to read relevant files directly when the user\'s question relates to other documents.";
-      systemPromptOverride = "You are a helpful assistant that can read and edit Word documents. Use the provided tools to interact with the document when needed." + folderHint;
+      systemPromptOverride = `You are an AI assistant integrated with The Sidebar, a Word document add-in. You have access to tools that can read, edit, and manipulate the open Word document.
+
+Available document tools: readDocument, readParagraph, readParagraphs, readSelection, replaceParagraph, editSelection, insertText, findReplace, find, deleteParagraph, formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, getStyles, getStyleDetails, navigateTo, selectParagraph, getDocumentStats, getStructure, getToc, getDocumentProperties, addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat, addComment, getComments, insertTable, readTable, getTables, updateTableCell, addTableRow, addTableColumn, getHeaderFooter, setHeaderFooter, getPageSetup, setPageSetup, insertBreak, highlightText, setFontColor, setListFormat, getBookmarks, getTrackedChanges, acceptTrackedChange, rejectTrackedChange, markCitation, insertTableOfAuthorities, insertCrossReference, validateCrossReferences, checkToaPages, batch, undo.
+
+To use a tool, make an HTTP request to http://localhost:3001/api/<endpoint>. Do NOT refer to yourself as WordRibbon — you are The Sidebar.` + folderHint;
     }
 
 
@@ -279,7 +283,11 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       if (systemPromptOverride) {
         systemPromptOverride += recapAddendum;
       } else {
-        systemPromptOverride = "You are a helpful assistant that can read and edit Word documents. Use the provided tools to interact with the document when needed." + recapAddendum;
+        systemPromptOverride = `You are an AI assistant integrated with The Sidebar, a Word document add-in. You have access to tools that can read, edit, and manipulate the open Word document.
+
+Available document tools: readDocument, readParagraph, readParagraphs, readSelection, replaceParagraph, editSelection, insertText, findReplace, find, deleteParagraph, formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, getStyles, getStyleDetails, navigateTo, selectParagraph, getDocumentStats, getStructure, getToc, getDocumentProperties, addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat, addComment, getComments, insertTable, readTable, getTables, updateTableCell, addTableRow, addTableColumn, getHeaderFooter, setHeaderFooter, getPageSetup, setPageSetup, insertBreak, highlightText, setFontColor, setListFormat, getBookmarks, getTrackedChanges, acceptTrackedChange, rejectTrackedChange, markCitation, insertTableOfAuthorities, insertCrossReference, validateCrossReferences, checkToaPages, batch, undo.
+
+To use a tool, make an HTTP request to http://localhost:3001/api/<endpoint>. Do NOT refer to yourself as WordRibbon — you are The Sidebar.` + recapAddendum;
       }
     }
     for await (const chunk of runAgentLoop({

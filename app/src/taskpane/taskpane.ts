@@ -352,7 +352,10 @@ function setupPromptUI() {
     const model = modelSelect?.value || selectedModel || undefined;
     socket.send(JSON.stringify({ type: "prompt", clientId, text, model, context: context || undefined }));
 
-    const el = appendChatEntry("user", text, "Sending…");
+    // Show clean label for quick actions, full text for manual prompts
+    const displayText = (input as any)._displayLabel || text;
+    delete (input as any)._displayLabel;
+    const el = appendChatEntry("user", displayText, "Sending…");
     el.setAttribute("data-client-id", clientId);
     pendingPromptEls.set(clientId, el);
     input.value = "";
@@ -2587,7 +2590,7 @@ const QUICK_ACTIONS_DEFAULTS: QuickActionCategory[] = [
     actions: [
       { name: "Check Bluebook", prompt: "Review all citations in this document for Bluebook formatting errors. List each error with the paragraph number, the incorrect citation, and the corrected version." },
       { name: "Long/Short Cites", prompt: "Check that every short citation in this document has a corresponding full citation earlier in the document. Flag any short cites that don't match a prior long cite, and any long cites that are repeated unnecessarily." },
-      { name: "TOA Pages", prompt: "Review the Table of Authorities and verify that the page numbers are correct. List any discrepancies." },
+      { name: "TOA Pages", prompt: "Use the checkToaPages tool to export this document to PDF, parse the actual page numbers where each citation appears, and compare them against the page numbers listed in the Table of Authorities. Report every discrepancy: citations with wrong pages, missing pages, and extra pages." },
       { name: "Find Uncited", prompt: "Identify any factual assertions in this document that lack a supporting citation or footnote." },
     ]
   },
@@ -2673,11 +2676,15 @@ async function resolvePromptVariables(prompt: string): Promise<string> {
   return resolved;
 }
 
-async function executeQuickAction(prompt: string): Promise<void> {
+async function executeQuickAction(prompt: string, displayLabel?: string): Promise<void> {
   const resolved = await resolvePromptVariables(prompt);
   const input = document.getElementById("prompt-input") as HTMLTextAreaElement;
   if (input) {
     input.value = resolved;
+    // Store display label so the chat shows a clean message instead of the raw prompt
+    if (displayLabel) {
+      (input as any)._displayLabel = displayLabel;
+    }
     input.dispatchEvent(new Event("input")); // trigger auto-resize
   }
   const sendBtn = document.getElementById("prompt-send") as HTMLButtonElement;
@@ -2771,7 +2778,7 @@ function setupQuickActions(): void {
         nameSpan.addEventListener("click", (e) => {
           e.stopPropagation();
           closeAllDropdowns();
-          executeQuickAction(effectivePrompt);
+          executeQuickAction(effectivePrompt, action.name);
         });
 
         const icons = document.createElement("span");
@@ -2810,7 +2817,17 @@ function setupQuickActions(): void {
         closeAllDropdowns();
         if (!wasActive) {
           pill.classList.add("active");
+          // Position dropdown using fixed positioning
+          const rect = pill.getBoundingClientRect();
+          dropdown.style.left = rect.left + "px";
+          // Try to show above the pill; if not enough room, show below
           dropdown.classList.add("visible");
+          const ddRect = dropdown.getBoundingClientRect();
+          if (rect.top - ddRect.height > 0) {
+            dropdown.style.top = (rect.top - ddRect.height - 4) + "px";
+          } else {
+            dropdown.style.top = (rect.bottom + 4) + "px";
+          }
         }
       });
       bar.appendChild(pill);
@@ -2886,7 +2903,15 @@ function setupQuickActions(): void {
       closeAllDropdowns();
       if (!wasActive) {
         customPill.classList.add("active");
+        const rect = customPill.getBoundingClientRect();
+        customDropdown.style.left = rect.left + "px";
         customDropdown.classList.add("visible");
+        const ddRect = customDropdown.getBoundingClientRect();
+        if (rect.top - ddRect.height > 0) {
+          customDropdown.style.top = (rect.top - ddRect.height - 4) + "px";
+        } else {
+          customDropdown.style.top = (rect.bottom + 4) + "px";
+        }
       }
     });
     bar.appendChild(customPill);
