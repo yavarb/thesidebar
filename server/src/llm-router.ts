@@ -89,7 +89,7 @@ export const cacheStats: CacheStats = {
  */
 export function httpRequest(
   url: string,
-  options: { method: string; headers: Record<string, string> },
+  options: { method: string; headers: Record<string, string>; timeoutMs?: number },
   body?: any
 ): Promise<http.IncomingMessage> {
   return new Promise((resolve, reject) => {
@@ -101,6 +101,9 @@ export function httpRequest(
       rejectUnauthorized: false,
     }, (res) => resolve(res));
     req.on("error", reject);
+    req.setTimeout(options.timeoutMs ?? 60000, () => {
+      req.destroy(new Error(`Request timeout after ${options.timeoutMs ?? 60000}ms: ${url}`));
+    });
     if (body !== undefined) {
       req.write(typeof body === "string" ? body : JSON.stringify(body));
     }
