@@ -95,18 +95,39 @@ function smoothScroll(el: HTMLElement) {
   }
 }
 
+let thinkingTimerInterval: any = null;
+
 function addThinkingIndicator(): HTMLElement {
   const history = document.getElementById("prompt-history")!;
   const el = document.createElement("div");
   el.className = "chat-thinking";
   el.id = "thinking-indicator";
-  el.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
+  el.innerHTML = '<div class="thinking-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div><span class="thinking-elapsed"></span>';
   history.appendChild(el);
   history.scrollTop = history.scrollHeight;
+
+  // Start elapsed timer
+  const startTime = Date.now();
+  const elapsedEl = el.querySelector(".thinking-elapsed") as HTMLElement;
+  if (thinkingTimerInterval) clearInterval(thinkingTimerInterval);
+  thinkingTimerInterval = setInterval(() => {
+    const seconds = Math.floor((Date.now() - startTime) / 1000);
+    if (seconds < 5) {
+      elapsedEl.textContent = "";
+    } else if (seconds < 60) {
+      elapsedEl.textContent = `${seconds}s`;
+    } else {
+      const min = Math.floor(seconds / 60);
+      const sec = seconds % 60;
+      elapsedEl.textContent = `${min}m ${sec.toString().padStart(2, "0")}s`;
+    }
+  }, 1000);
+
   return el;
 }
 
 function removeThinkingIndicator(): void {
+  if (thinkingTimerInterval) { clearInterval(thinkingTimerInterval); thinkingTimerInterval = null; }
   const el = document.getElementById("thinking-indicator");
   if (el) el.remove();
 }
