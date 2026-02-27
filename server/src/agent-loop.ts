@@ -22,7 +22,7 @@ import { routePrompt, RouterConfig, PromptContext, httpRequest } from "./llm-rou
 const MAX_ITERATIONS = 15;
 
 /** Default The Sidebar server base URL for executing tools */
-const DEFAULT_SERVER_URL = "https://localhost:3001";
+const DEFAULT_SERVER_URL = "http://localhost:3001";
 
 // ── Types ──
 

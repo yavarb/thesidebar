@@ -7,55 +7,510 @@
   <title>The Sidebar</title>
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
   <style>
-    * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 0; padding: 12px; background: #f8f8f8; font-size: 13px; }
-    h2 { font-size: 15px; margin: 0 0 8px; color: #333; }
-    .status-ok { color: #2d7d2d; font-weight: 600; }
-    .status-err { color: #c33; font-weight: 600; }
-    #app-body { display: none; flex-direction: column; gap: 10px; height: calc(100vh - 24px); }
-    .meta { display: flex; justify-content: space-between; align-items: center; }
-    .meta .info { font-size: 11px; color: #888; }
-    /* Prompt section */
-    .prompt-section { border-top: 1px solid #ddd; padding-top: 10px; }
-    .prompt-section h3 { font-size: 12px; margin: 0 0 6px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; }
-    .prompt-row { display: flex; gap: 6px; align-items: center; }
-    .prompt-row input { flex: 1; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; outline: none; }
-    .prompt-row select { width: 130px; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; background: #fff; }
-    .prompt-row input:focus { border-color: #0078d4; }
-    .prompt-row button { padding: 6px 12px; background: #0078d4; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; }
-    .prompt-row button:hover { background: #106ebe; }
-    /* Prompt conversation */
-    #prompt-history { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding-top: 8px; }
-    .chat-entry { background: #fff; border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
-    .chat-user { border-left: 3px solid #0078d4; }
-    .chat-assistant { border-left: 3px solid #5b9b5b; }
-    .chat-role { font-size: 11px; font-weight: 700; text-transform: uppercase; color: #666; margin-bottom: 4px; letter-spacing: 0.3px; }
-    .chat-text { color: #222; white-space: pre-wrap; line-height: 1.35; }
-    .chat-status { margin-top: 4px; font-size: 10px; color: #888; }
+    /* Hide Word's GetStarted info button overlay */
+    #WACDialogPanel, #WACDialogOuterContainer,
+    [class*="getStarted"], [class*="GetStarted"],
+    [class*="firstRun"], .ms-firstrun-container,
+    div[style*="position: absolute"][style*="right: 0"][style*="top: 0"],
+    .OfficeDialogContainer { display: none !important; visibility: hidden !important; }
 
-    /* Settings panel */
-    .settings-gear { cursor: pointer; font-size: 16px; margin-left: 8px; opacity: 0.6; transition: opacity 0.2s; user-select: none; }
+    /* ===== Theme Variables ===== */
+    :root {
+      --bg-primary: #ffffff;
+      --bg-secondary: #fafafa;
+      --bg-tertiary: #f0f0f0;
+      --text-primary: #1a1a1a;
+      --text-secondary: #666;
+      --text-placeholder: #9ca3af;
+      --accent: #000000;
+      --accent-highlight: #6366f1;
+      --bubble-user: #1a1a1a;
+      --bubble-user-text: #ffffff;
+      --bubble-assistant: #f0f0f0;
+      --bubble-assistant-text: #1a1a1a;
+      --input-bg: #ffffff;
+      --input-border: #e0e0e0;
+      --input-focus-border: #6366f1;
+      --border-color: #f0f0f0;
+      --send-bg: #000000;
+      --send-text: #ffffff;
+      --send-hover: #333333;
+      --code-bg: rgba(0,0,0,0.06);
+      --code-bg-user: rgba(255,255,255,0.15);
+      --pre-bg: rgba(0,0,0,0.05);
+      --settings-bg: #ffffff;
+      --settings-field-bg: #fafafa;
+      --settings-field-focus-bg: #ffffff;
+      --overlay-bg: rgba(0,0,0,0.3);
+      --scrollbar-thumb: #d4d4d4;
+      --thinking-dot: #9ca3af;
+      --select-border: #e5e7eb;
+      --btn-cancel-bg: #f3f4f6;
+      --btn-cancel-text: #333;
+      --btn-cancel-hover: #e5e7eb;
+      --remove-hover-bg: #fef2f2;
+    }
+
+    [data-theme="dark"] {
+      --bg-primary: #1e1e1e;
+      --bg-secondary: #252526;
+      --bg-tertiary: #2d2d2d;
+      --text-primary: #e0e0e0;
+      --text-secondary: #888;
+      --text-placeholder: #666;
+      --accent: #6366f1;
+      --accent-highlight: #6366f1;
+      --bubble-user: #4f46e5;
+      --bubble-user-text: #ffffff;
+      --bubble-assistant: #383838;
+      --bubble-assistant-text: #e0e0e0;
+      --input-bg: #2d2d2d;
+      --input-border: #444;
+      --input-focus-border: #6366f1;
+      --border-color: #333;
+      --send-bg: #6366f1;
+      --send-text: #ffffff;
+      --send-hover: #4f46e5;
+      --code-bg: rgba(255,255,255,0.08);
+      --code-bg-user: rgba(255,255,255,0.15);
+      --pre-bg: rgba(255,255,255,0.05);
+      --settings-bg: #252526;
+      --settings-field-bg: #2d2d2d;
+      --settings-field-focus-bg: #333;
+      --overlay-bg: rgba(0,0,0,0.5);
+      --scrollbar-thumb: #555;
+      --thinking-dot: #888;
+      --select-border: #444;
+      --btn-cancel-bg: #2d2d2d;
+      --btn-cancel-text: #ccc;
+      --btn-cancel-hover: #3d3d3d;
+      --remove-hover-bg: #3a2020;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg-primary: #1e1e1e;
+        --bg-secondary: #252526;
+        --bg-tertiary: #2d2d2d;
+        --text-primary: #e0e0e0;
+        --text-secondary: #888;
+        --text-placeholder: #666;
+        --accent: #6366f1;
+        --accent-highlight: #6366f1;
+        --bubble-user: #4f46e5;
+        --bubble-user-text: #ffffff;
+        --bubble-assistant: #383838;
+        --bubble-assistant-text: #e0e0e0;
+        --input-bg: #2d2d2d;
+        --input-border: #444;
+        --input-focus-border: #6366f1;
+        --border-color: #333;
+        --send-bg: #6366f1;
+        --send-text: #ffffff;
+        --send-hover: #4f46e5;
+        --code-bg: rgba(255,255,255,0.08);
+        --code-bg-user: rgba(255,255,255,0.15);
+        --pre-bg: rgba(255,255,255,0.05);
+        --settings-bg: #252526;
+        --settings-field-bg: #2d2d2d;
+        --settings-field-focus-bg: #333;
+        --overlay-bg: rgba(0,0,0,0.5);
+        --scrollbar-thumb: #555;
+        --thinking-dot: #888;
+        --select-border: #444;
+        --btn-cancel-bg: #2d2d2d;
+        --btn-cancel-text: #ccc;
+        --btn-cancel-hover: #3d3d3d;
+        --remove-hover-bg: #3a2020;
+      }
+    }
+
+    /* ===== Hide Office.js injected elements ===== */
+    .ms-firstrun-container,
+    [class*="firstRun"],
+    iframe[style*="position: absolute"] { display: none !important; }
+
+    /* ===== Base ===== */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+      margin: 0; padding: 0;
+      background: var(--bg-secondary);
+      font-size: 13px;
+      color: var(--text-primary);
+      height: 100vh;
+      overflow: hidden;
+      transition: background-color 0.2s, color 0.2s;
+    }
+
+    #sideload-msg { padding: 20px; text-align: center; color: var(--text-secondary); }
+
+    #app-body {
+      display: none;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ===== Header ===== */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border-color);
+      background: var(--bg-primary);
+      flex-shrink: 0;
+      min-height: 40px;
+      position: relative;
+      z-index: 10;
+      transition: background-color 0.2s, border-color 0.2s;
+    }
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #ef4444;
+      display: inline-block;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .status-dot.connected { background: #22c55e; }
+    .status-ok { background: #22c55e; }
+    .status-err { background: #ef4444; }
+    #pane-name { display: none; }
+    #status { font-size: 0; line-height: 0; }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .theme-toggle {
+      cursor: pointer;
+      font-size: 15px;
+      opacity: 0.5;
+      transition: opacity 0.2s;
+      user-select: none;
+      background: none;
+      border: none;
+      padding: 2px;
+      line-height: 1;
+    }
+    .theme-toggle:hover { opacity: 1; }
+    .settings-gear {
+      cursor: pointer;
+      font-size: 16px;
+      opacity: 0.5;
+      transition: opacity 0.2s;
+      user-select: none;
+    }
     .settings-gear:hover { opacity: 1; }
-    #settings-panel { display: none; background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+
+    /* ===== Chat history ===== */
+    #prompt-history {
+      flex: 1;
+      overflow-y: auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 12px 14px;
+      background: var(--bg-primary);
+      transition: background-color 0.2s;
+    }
+    #prompt-history::-webkit-scrollbar { width: 4px; }
+    #prompt-history::-webkit-scrollbar-track { background: transparent; }
+    #prompt-history::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
+
+    /* ===== Chat entries ===== */
+    .chat-entry {
+      max-width: 85%;
+      padding: 8px 12px;
+      border-radius: 14px;
+      font-size: 13px;
+      line-height: 1.5;
+      animation: msgIn 0.2s ease-out;
+      transition: background-color 0.2s, color 0.2s;
+    }
+    @keyframes msgIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .chat-user {
+      align-self: flex-end;
+      background: var(--bubble-user);
+      color: var(--bubble-user-text);
+      border-bottom-right-radius: 4px;
+    }
+    .chat-assistant {
+      align-self: flex-start;
+      background: var(--bubble-assistant);
+      color: var(--bubble-assistant-text);
+      border-bottom-left-radius: 4px;
+    }
+    .chat-role { display: none; }
+    .chat-text {
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.5;
+    }
+    .chat-text code {
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: 12px;
+      background: var(--code-bg);
+      padding: 1px 4px;
+      border-radius: 3px;
+    }
+    .chat-user .chat-text code {
+      background: var(--code-bg-user);
+    }
+    .chat-text pre {
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: 12px;
+      background: var(--pre-bg);
+      padding: 8px;
+      border-radius: 6px;
+      overflow-x: auto;
+      margin: 4px 0;
+    }
+    .chat-status {
+      font-size: 11px;
+      opacity: 0.6;
+      margin-top: 3px;
+    }
+
+    /* ===== Input area ===== */
+    .input-area {
+      flex-shrink: 0;
+      padding: 8px 14px 12px;
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border-color);
+      transition: background-color 0.2s, border-color 0.2s;
+    }
+    .model-pill select {
+      appearance: none;
+      -webkit-appearance: none;
+      border: 1px solid var(--select-border);
+      background: var(--input-bg);
+      padding: 3px 20px 3px 8px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--accent-highlight);
+      border-radius: 12px;
+      cursor: pointer;
+      outline: none;
+      margin-bottom: 6px;
+      background-image: url("data:image/svg+xml,%3Csvg width='8' height='5' viewBox='0 0 8 5' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L4 4L7 1' stroke='%236366f1' stroke-width='1.2' stroke-linecap='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 7px center;
+      transition: border-color 0.15s, background-color 0.2s;
+    }
+    .model-pill select:hover { border-color: var(--accent-highlight); }
+    .textarea-wrap {
+      position: relative;
+      background: var(--input-bg);
+      border: 1px solid var(--input-border);
+      border-radius: 12px;
+      transition: border-color 0.15s, box-shadow 0.15s, background-color 0.2s;
+    }
+    .textarea-wrap:focus-within {
+      border-color: var(--input-focus-border);
+      box-shadow: 0 0 0 3px rgba(99,102,241,0.1);
+    }
+    .textarea-wrap textarea {
+      width: 100%;
+      min-height: 60px;
+      max-height: 180px;
+      padding: 10px 40px 10px 12px;
+      border: none;
+      border-radius: 12px;
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1.5;
+      resize: none;
+      outline: none;
+      background: transparent;
+      color: var(--text-primary);
+    }
+    .textarea-wrap textarea::placeholder { color: var(--text-placeholder); }
+    .send-btn {
+      position: absolute;
+      bottom: 8px;
+      right: 8px;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      border: none;
+      background: var(--send-bg);
+      color: var(--send-text);
+      font-size: 14px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s, transform 0.1s;
+    }
+    .send-btn:hover { background: var(--send-hover); }
+    .send-btn:active { transform: scale(0.93); }
+
+    /* ===== Settings overlay ===== */
+    .settings-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: var(--overlay-bg);
+      z-index: 100;
+      animation: fadeIn 0.15s ease-out;
+    }
+    .settings-overlay.visible { display: flex; align-items: center; justify-content: center; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+    #settings-panel {
+      display: none;
+      background: var(--settings-bg);
+      border-radius: 12px;
+      padding: 20px;
+      width: calc(100% - 32px);
+      max-width: 360px;
+      max-height: 80vh;
+      overflow-y: auto;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+      animation: slideUp 0.2s ease-out;
+      transition: background-color 0.2s;
+    }
     #settings-panel.visible { display: block; }
-    #settings-panel h3 { font-size: 13px; margin: 0 0 10px; color: #333; }
-    .settings-field { margin-bottom: 10px; }
-    .settings-field label { display: block; font-size: 11px; font-weight: 600; color: #555; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.3px; }
-    .settings-field input, .settings-field select { width: 100%; padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 12px; outline: none; }
-    .settings-field input:focus { border-color: #0078d4; }
-    .settings-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 12px; }
-    .settings-actions button { padding: 6px 14px; border: none; border-radius: 4px; font-size: 12px; font-weight: 600; cursor: pointer; }
-    .settings-actions .btn-save { background: #0078d4; color: #fff; }
-    .settings-actions .btn-save:hover { background: #106ebe; }
-    .settings-actions .btn-cancel { background: #e8e8e8; color: #333; }
-    .settings-actions .btn-cancel:hover { background: #d0d0d0; }
-    .settings-status { font-size: 11px; color: #2d7d2d; margin-top: 6px; display: none; }
-    .settings-status.error { color: #c33; }
-    .local-endpoint { display: flex; gap: 4px; margin-bottom: 4px; align-items: center; }
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    #settings-panel h3 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: var(--text-primary);
+    }
+    .settings-field { margin-bottom: 12px; }
+    .settings-field label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .settings-field input,
+    .settings-field select {
+      width: 100%;
+      padding: 7px 10px;
+      border: 1px solid var(--input-border);
+      border-radius: 8px;
+      font-size: 12px;
+      outline: none;
+      background: var(--settings-field-bg);
+      color: var(--text-primary);
+      transition: border-color 0.15s, background-color 0.2s;
+    }
+    .settings-field input:focus,
+    .settings-field select:focus {
+      border-color: var(--accent-highlight);
+      background: var(--settings-field-focus-bg);
+    }
+    .settings-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 16px;
+    }
+    .settings-actions button {
+      padding: 7px 16px;
+      border: none;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-save { background: var(--accent-highlight); color: #fff; }
+    .btn-save:hover { background: #4f46e5; }
+    .btn-cancel { background: var(--btn-cancel-bg); color: var(--btn-cancel-text); }
+    .btn-cancel:hover { background: var(--btn-cancel-hover); }
+    .settings-status {
+      font-size: 11px;
+      color: #22c55e;
+      margin-top: 8px;
+      display: none;
+    }
+    .settings-status.error { color: #ef4444; }
+
+    .local-endpoint {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 4px;
+      align-items: center;
+    }
     .local-endpoint input { flex: 1; }
-    .local-endpoint .remove-endpoint { background: none; border: none; color: #c33; cursor: pointer; font-size: 14px; padding: 2px 6px; }
-    .add-endpoint { font-size: 11px; color: #0078d4; cursor: pointer; border: none; background: none; padding: 2px 0; }
+    .ep-name, .ep-url { }
+    .remove-endpoint {
+      background: none;
+      border: none;
+      color: #ef4444;
+      cursor: pointer;
+      font-size: 14px;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .remove-endpoint:hover { background: var(--remove-hover-bg); }
+    .add-endpoint {
+      font-size: 11px;
+      color: var(--accent-highlight);
+      cursor: pointer;
+      border: none;
+      background: none;
+      padding: 2px 0;
+      font-weight: 500;
+    }
     .add-endpoint:hover { text-decoration: underline; }
+
+    /* ===== Thinking indicator ===== */
+    .chat-thinking {
+      align-self: flex-start;
+      background: var(--bubble-assistant);
+      border-radius: 14px;
+      border-bottom-left-radius: 4px;
+      padding: 12px 16px;
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      animation: msgIn 0.2s ease-out;
+      transition: background-color 0.2s;
+    }
+    .chat-thinking .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--thinking-dot);
+      animation: dotBounce 1.4s ease-in-out infinite;
+    }
+    .chat-thinking .dot:nth-child(2) { animation-delay: 0.2s; }
+    .chat-thinking .dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes dotBounce {
+      0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+      30% { transform: translateY(-4px); opacity: 1; }
+    }
+
+    /* ===== Scrollbar for settings ===== */
+    #settings-panel::-webkit-scrollbar { width: 4px; }
+    #settings-panel::-webkit-scrollbar-track { background: transparent; }
+    #settings-panel::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
   </style>
 </head>
 <body>
@@ -63,58 +518,117 @@
     <p>Please sideload the add-in to see it in action.</p>
   </div>
   <div id="app-body">
-    <div class="meta">
-      <h2>⚖️ The Sidebar</h2>
-      <span class="info" id="pane-name">—</span>
-      <span class="settings-gear" id="settings-toggle" title="Settings">⚙️</span>
-    </div>
-    <p style="margin:0;">Status: <span id="status" class="status-err">Connecting...</span></p>
-    
+    <div class="header">
+      <div class="header-left">
+        <span>⚖️ The Sidebar</span>
+        <span class="status-dot" id="status" title="Connection status"></span>
+        <span id="pane-name">—</span>
+      </div>
+      <div class="header-right">
+        <button class="theme-toggle" id="theme-toggle" title="Toggle theme">☀️</button>
 
-    <div id="settings-panel">
-      <h3>⚙️ Settings</h3>
-      <div class="settings-field">
-        <label>OpenClaw URL</label>
-        <input id="settings-openclaw-url" type="text" placeholder="https://localhost:3001" />
-      </div>
-      <div class="settings-field">
-        <label>OpenAI API Key</label>
-        <input id="settings-openai-key" type="password" placeholder="sk-..." />
-      </div>
-      <div class="settings-field">
-        <label>Anthropic API Key</label>
-        <input id="settings-anthropic-key" type="password" placeholder="sk-ant-..." />
-      </div>
-      <div class="settings-field">
-        <label>Local Endpoints</label>
-        <div id="settings-local-endpoints"></div>
-        <button class="add-endpoint" id="settings-add-endpoint">+ Add endpoint</button>
-      </div>
-      <div class="settings-field">
-        <label>Default Model</label>
-        <select id="settings-default-model">
-          <option value="">Select model...</option>
-        </select>
-      </div>
-      <div class="settings-actions">
-        <button class="btn-cancel" id="settings-cancel">Cancel</button>
-        <button class="btn-save" id="settings-save">Save</button>
-      </div>
-      <div class="settings-status" id="settings-status"></div>
-    </div>
-    
-    <div class="prompt-section">
-      <h3>Prompt</h3>
-      <div class="prompt-row">
-        <select id="model-select" title="Model">
-          <option value="">Model…</option>
-        </select>
-        <input id="prompt-input" type="text" placeholder="Type a prompt..." autocomplete="off" />
-        <button id="prompt-send">Send</button>
       </div>
     </div>
-    
+
     <div id="prompt-history" aria-live="polite"></div>
+
+    <div class="settings-overlay" id="settings-overlay">
+      <div id="settings-panel">
+        <h3>Settings</h3>
+        <div class="settings-field">
+          <label>OpenClaw URL</label>
+          <input id="settings-openclaw-url" type="text" placeholder="https://localhost:3001" />
+        </div>
+        <div class="settings-field">
+          <label>OpenClaw Token</label>
+          <input id="settings-openclaw-token" type="password" placeholder="Token..." />
+        </div>
+        <div class="settings-field">
+          <label>OpenAI API Key</label>
+          <input id="settings-openai-key" type="password" placeholder="sk-..." />
+        </div>
+        <div class="settings-field">
+          <label>Anthropic API Key</label>
+          <input id="settings-anthropic-key" type="password" placeholder="sk-ant-..." />
+        </div>
+        <div class="settings-field">
+          <label>Local Endpoints</label>
+          <div id="settings-local-endpoints"></div>
+          <button class="add-endpoint" id="settings-add-endpoint">+ Add endpoint</button>
+        </div>
+        <div class="settings-field">
+          <label>Default Model</label>
+          <select id="settings-default-model">
+            <option value="">Select model...</option>
+          </select>
+        </div>
+        <div class="settings-actions">
+          <button class="btn-cancel" id="settings-cancel">Cancel</button>
+          <button class="btn-save" id="settings-save">Save</button>
+        </div>
+        <div class="settings-status" id="settings-status"></div>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="input-controls" style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+        <span class="settings-gear" id="settings-toggle" title="Settings" style="cursor:pointer;font-size:15px;opacity:0.5;transition:opacity 0.2s;">⚙️</span>
+        <div class="model-pill">
+          <select id="model-select" title="Model">
+            <option value="">Model…</option>
+          </select>
+        </div>
+      </div>
+      <div class="textarea-wrap">
+        <textarea id="prompt-input" rows="3" placeholder="Ask about your document..." autocomplete="off"></textarea>
+        <button class="send-btn" id="prompt-send" title="Send">↑</button>
+      </div>
+    </div>
   </div>
+
+  <script>
+    (function() {
+      // Theme initialization
+      var themeToggle = document.getElementById('theme-toggle');
+      function getEffectiveTheme() {
+        var saved = localStorage.getItem('sidebar-theme');
+        if (saved) return saved;
+        return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      }
+      function applyTheme(theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+        if (themeToggle) themeToggle.textContent = theme === 'dark' ? '🌙' : '☀️';
+      }
+      applyTheme(getEffectiveTheme());
+
+      if (themeToggle) {
+        themeToggle.addEventListener('click', function() {
+          var current = document.documentElement.getAttribute('data-theme') || getEffectiveTheme();
+          var next = current === 'dark' ? 'light' : 'dark';
+          localStorage.setItem('sidebar-theme', next);
+          applyTheme(next);
+        });
+      }
+
+      // Listen for system theme changes
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
+        if (!localStorage.getItem('sidebar-theme')) {
+          applyTheme(e.matches ? 'dark' : 'light');
+        }
+      });
+
+      // Textarea auto-resize
+      var ta = document.getElementById('prompt-input');
+      var send = document.getElementById('prompt-send');
+      if (!ta || !send) return;
+
+      ta.addEventListener('input', function() {
+        this.style.height = 'auto';
+        this.style.height = Math.min(this.scrollHeight, 180) + 'px';
+      });
+
+      // Settings toggle handled by taskpane.ts setupSettingsUI()
+    })();
+  </script>
 </body>
 </html>

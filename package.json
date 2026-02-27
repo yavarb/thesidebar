@@ -1,35 +1,105 @@
 {
   "name": "thesidebar",
   "version": "0.1.0",
-  "description": "The Sidebar — AI-powered legal writing assistant for Microsoft Word",
+  "description": "The Sidebar \u2014 AI-powered legal writing assistant for Microsoft Word",
   "license": "MIT",
+  "main": "electron/dist/main.js",
   "repository": {
     "type": "git",
     "url": "https://github.com/yavarb/thesidebar.git"
   },
   "author": "Yavar Bathaee",
   "scripts": {
-    "build": "npm run build:server && npm run build:app",
     "build:server": "cd server && npm run build",
     "build:app": "cd app && npm run build",
-    "dev": "cd server && npm run dev",
-    "start": "cd server && npm start",
+    "build:electron": "cd electron && npx tsc",
+    "build:all": "npm run build:server && npm run build:app && npm run build:electron",
+    "start": "npm run build:electron && npx electron electron/dist/main.js",
+    "dev": "cd electron && npx tsc && npx electron dist/main.js",
+    "build": "npm run build:all && npx electron-builder --mac",
     "test": "cd server && npm test",
-    "install:all": "npm install && cd server && npm install && cd ../app && npm install && cd ../electron && npm install"
+    "install:all": "npm install && cd server && npm install && cd ../app && npm install",
+    "postinstall": "cd server && npm install && cd ../app && npm install"
   },
   "build": {
     "appId": "com.thesidebar.app",
     "productName": "The Sidebar",
     "mac": {
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.icns"
     },
-    "publish": [
+    "files": [
+      "electron/dist/**/*",
+      "package.json",
+      "!app/**/*",
+      "!server/**/*",
+      "!docs/**/*",
+      "!certs/**/*",
+      "!build/**/*",
+      "!dist/**/*",
+      "!*.sh",
+      "!*.md"
+    ],
+    "extraResources": [
       {
-        "provider": "github",
-        "owner": "yavarb",
-        "repo": "thesidebar"
+        "from": "server/",
+        "to": "server",
+        "filter": [
+          "dist/**",
+          "node_modules/**",
+          "package.json"
+        ]
+      },
+      {
+        "from": "app/dist/",
+        "to": "app/dist"
+      },
+      {
+        "from": "app/manifest.xml",
+        "to": "app/manifest.xml"
+      },
+      {
+        "from": "build/trayTemplate.png",
+        "to": "trayTemplate.png"
+      },
+      {
+        "from": "build/trayTemplate@2x.png",
+        "to": "trayTemplate@2x.png"
       }
-    ]
+    ],
+    "publish": {
+      "provider": "github",
+      "owner": "yavarb",
+      "repo": "thesidebar"
+    },
+    "directories": {
+      "app": "."
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.2"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
   },
   "engines": {
     "node": ">=18"

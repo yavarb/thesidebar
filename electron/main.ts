@@ -21,7 +21,7 @@ import {
 } from "electron";
 import { fork, ChildProcess, execSync } from "child_process";
 import path from "path";
-import https from "https";
+import http from "http";
 import fs from "fs";
 import { autoUpdater, UpdateInfo } from "electron-updater";
 import { firstRunSetup, isFirstRun } from "./first-run";
@@ -70,9 +70,9 @@ function logError(msg: string): void {
 /** Fetch JSON from the The Sidebar server */
 function fetchStatus(): Promise<any> {
   return new Promise((resolve, reject) => {
-    const req = https.get(
-      `https://localhost:${SERVER_PORT}/api/status`,
-      { rejectUnauthorized: false },
+    const req = http.get(
+      `http://localhost:${SERVER_PORT}/api/status`,
+      
       (res) => {
         let body = "";
         res.on("data", (c: Buffer) => (body += c));
@@ -119,7 +119,7 @@ function startServer(): void {
     log(`[server] Forking ${serverEntry}`);
     serverProcess = fork(serverEntry, [], {
       cwd: resourcePath("server"),
-      env: { ...process.env, SIDEBAR_PORT: String(SERVER_PORT), NODE_TLS_REJECT_UNAUTHORIZED: "0" },
+      env: { ...process.env, SIDEBAR_PORT: String(SERVER_PORT), },
       silent: true,
     });
 
@@ -242,13 +242,13 @@ function generateManifest(destPath: string): void {
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="The Sidebar"/>
   <Description DefaultValue="AI-powered Word assistant"/>
-  <IconUrl DefaultValue="https://localhost:3001/assets/icon-32.png"/>
-  <HighResolutionIconUrl DefaultValue="https://localhost:3001/assets/icon-64.png"/>
+  <IconUrl DefaultValue="http://localhost:3001/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="http://localhost:3001/assets/icon-64.png"/>
   <SupportUrl DefaultValue="https://github.com/yavarb/thesidebar"/>
-  <AppDomains><AppDomain>https://localhost:3001</AppDomain></AppDomains>
+  <AppDomains><AppDomain>http://localhost:3001</AppDomain></AppDomains>
   <Hosts><Host Name="Document"/></Hosts>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://localhost:3001/taskpane.html"/>
+    <SourceLocation DefaultValue="http://localhost:3001/taskpane.html"/>
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
@@ -294,14 +294,14 @@ function generateManifest(destPath: string): void {
     </Hosts>
     <Resources>
       <bt:Images>
-        <bt:Image id="Icon.16x16" DefaultValue="https://localhost:3001/assets/icon-16.png"/>
-        <bt:Image id="Icon.32x32" DefaultValue="https://localhost:3001/assets/icon-32.png"/>
-        <bt:Image id="Icon.80x80" DefaultValue="https://localhost:3001/assets/icon-80.png"/>
+        <bt:Image id="Icon.16x16" DefaultValue="http://localhost:3001/assets/icon-16.png"/>
+        <bt:Image id="Icon.32x32" DefaultValue="http://localhost:3001/assets/icon-32.png"/>
+        <bt:Image id="Icon.80x80" DefaultValue="http://localhost:3001/assets/icon-80.png"/>
       </bt:Images>
       <bt:Urls>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://github.com/yavarb/thesidebar"/>
-        <bt:Url id="Commands.Url" DefaultValue="https://localhost:3001/commands.html"/>
-        <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3001/taskpane.html"/>
+        <bt:Url id="Commands.Url" DefaultValue="http://localhost:3001/commands.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="http://localhost:3001/taskpane.html"/>
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="GetStarted.Title" DefaultValue="Welcome to The Sidebar!"/>
@@ -342,7 +342,7 @@ function updateTrayMenu(): void {
   items.push(
     { type: "separator" },
     { label: serverRunning ? "Stop Server" : "Start Server", click: () => serverRunning ? stopServer() : startServer() },
-    { label: "Open in Browser", enabled: serverRunning, click: () => shell.openExternal(`https://localhost:${SERVER_PORT}/api/status`) },
+    { label: "Open in Browser", enabled: serverRunning, click: () => shell.openExternal(`http://localhost:${SERVER_PORT}/api/status`) },
     { type: "separator" },
     { label: "Reinstall Word Add-in", click: () => { installWordAddin(); dialog.showMessageBox({ type: "info", title: "The Sidebar", message: "Add-in manifest reinstalled. Restart Word." }); } },
     { label: "Open Config Directory", click: () => shell.openPath(CONFIG_DIR) },
@@ -383,7 +383,7 @@ app.whenReady().then(async () => {
     }
   }
 
-  tray = new Tray(nativeImage.createEmpty());
+  const trayIconPath = app.isPackaged ? path.join(process.resourcesPath, "trayTemplate.png") : path.join(__dirname, "..", "build", "trayTemplate.png"); tray = new Tray(nativeImage.createFromPath(trayIconPath));
   tray.setTitle("⚖️");
   updateTrayMenu();
 

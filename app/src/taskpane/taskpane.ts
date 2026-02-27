@@ -1,7 +1,7 @@
 /* global Office, Word */
 
 // ── Config ──
-const WS_URL = `wss://${window.location.hostname}:3001`;
+const WS_URL = `ws://${window.location.hostname}:3001`;
 const RECONNECT_BASE = 500;
 const RECONNECT_MAX = 10000;
 const HEARTBEAT_TIMEOUT = 35000; // 3.5x server heartbeat interval
@@ -68,6 +68,24 @@ const DEFAULT_TIMEOUT = 15000;
 const pendingPromptEls = new Map<string, HTMLElement>();
 let selectedModel = "";
 
+function addThinkingIndicator(): HTMLElement {
+  const history = document.getElementById("prompt-history")!;
+  const el = document.createElement("div");
+  el.className = "chat-thinking";
+  el.id = "thinking-indicator";
+  el.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
+  history.appendChild(el);
+  history.scrollTop = history.scrollHeight;
+  return el;
+}
+
+function removeThinkingIndicator(): void {
+  const el = document.getElementById("thinking-indicator");
+  if (el) el.remove();
+}
+
+
+
 function appendChatEntry(role: "user" | "assistant", text: string, status?: string): HTMLElement {
   const history = document.getElementById("prompt-history")!;
   const el = document.createElement("div");
@@ -92,12 +110,12 @@ function appendChatEntry(role: "user" | "assistant", text: string, status?: stri
 }
 
 
-/** Load model options from settings (populated by settings panel) */
+/** Load model options into main dropdown on init */
 async function loadModels() {
   const select = document.getElementById("model-select") as HTMLSelectElement | null;
   if (!select) return;
-  // Model dropdown is populated by the settings panel via populateModelDropdown
   const saved = localStorage.getItem("wr:model");
+  await populateModelDropdown(select, saved || undefined);
   if (saved) {
     selectedModel = saved;
     select.value = saved;
@@ -124,6 +142,12 @@ function setupPromptUI() {
   const modelSelect = document.getElementById("model-select") as HTMLSelectElement | null;
   if (modelSelect) {
     modelSelect.addEventListener("change", () => {
+      if (modelSelect.value === "__configure__") {
+        const toggle = document.getElementById("settings-toggle");
+        if (toggle) toggle.click();
+        modelSelect.value = "";
+        return;
+      }
       selectedModel = modelSelect.value;
       localStorage.setItem("wr:model", selectedModel);
     });
@@ -155,7 +179,7 @@ function setupPromptUI() {
   };
 
   btn.addEventListener("click", sendPrompt);
-  input.addEventListener("keydown", (e) => { if (e.key === "Enter") sendPrompt(); });
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPrompt(); } });
 }
 
 // ── WebSocket ──
@@ -215,13 +239,51 @@ function connectWebSocket() {
           if (st) st.textContent = "Sent";
           if (promptId !== undefined) el.setAttribute("data-prompt-id", String(promptId));
           pendingPromptEls.delete(clientId);
+          // Show thinking indicator
+          addThinkingIndicator();
         }
         return;
       }
+      if (msg.type === "prompt_progress") {
+        removeThinkingIndicator();
+        const promptId = msg.promptId as number | undefined;
+        const progressText = msg.text as string | undefined;
+        if (!progressText || promptId === undefined) return;
+        const history = document.getElementById("prompt-history")!;
+        // Update or create streaming entry
+        let streamEl = history.querySelector(`[data-streaming-for="${promptId}"]`) as HTMLElement | null;
+        if (!streamEl) {
+          streamEl = document.createElement("div");
+          streamEl.className = "chat-entry chat-assistant";
+          streamEl.setAttribute("data-streaming-for", String(promptId));
+          const roleEl = document.createElement("div");
+          roleEl.className = "chat-role";
+          roleEl.textContent = "Assistant";
+          const textEl = document.createElement("div");
+          textEl.className = "chat-text";
+          textEl.textContent = progressText;
+          streamEl.appendChild(roleEl);
+          streamEl.appendChild(textEl);
+          const userEl = history.querySelector(`[data-prompt-id="${promptId}"]`) as HTMLElement | null;
+          if (userEl) userEl.insertAdjacentElement("afterend", streamEl);
+          else history.appendChild(streamEl);
+        } else {
+          const textEl = streamEl.querySelector(".chat-text") as HTMLElement;
+          if (textEl) textEl.textContent = progressText;
+        }
+        history.scrollTop = history.scrollHeight;
+        return;
+      }
       if (msg.type === "prompt_response") {
+        removeThinkingIndicator();
         const promptId = msg.promptId as number | undefined;
         const responseText = msg.text as string | undefined;
         if (!responseText) return;
+        // Remove streaming preview if it exists
+        if (promptId !== undefined) {
+          const streamEl = document.getElementById("prompt-history")?.querySelector(`[data-streaming-for="${promptId}"]`);
+          if (streamEl) streamEl.remove();
+        }
         const history = document.getElementById("prompt-history")!;
         let inserted = false;
         if (promptId !== undefined) {
@@ -933,7 +995,7 @@ interface SettingsModel {
 /** Load settings from the server and populate the form */
 async function loadSettings(): Promise<void> {
   try {
-    const r = await fetch("https://localhost:3001/api/settings");
+    const r = await fetch("http://localhost:3001/api/settings");
     const j = await r.json();
     if (!j?.ok) return;
     const data = j.data || {};
@@ -996,40 +1058,70 @@ function escapeHtml(s: string): string {
 async function populateModelDropdown(select: HTMLSelectElement, currentDefault?: string): Promise<void> {
   const models: SettingsModel[] = [];
 
-  // Add known OpenAI models
-  models.push(
-    { id: "openai:gpt-4o", label: "GPT-4o (OpenAI)", backend: "openai" },
-    { id: "openai:gpt-4o-mini", label: "GPT-4o Mini (OpenAI)", backend: "openai" },
-    { id: "openai:o1", label: "o1 (OpenAI)", backend: "openai" },
-  );
-
-  // Add known Anthropic models
-  models.push(
-    { id: "anthropic:claude-sonnet-4-20250514", label: "Claude Sonnet 4 (Anthropic)", backend: "anthropic" },
-    { id: "anthropic:claude-opus-4-20250514", label: "Claude Opus 4 (Anthropic)", backend: "anthropic" },
-  );
-
-  // Add local models from endpoints
-  const container = document.getElementById("settings-local-endpoints");
-  if (container) {
-    const rows = container.querySelectorAll(".local-endpoint");
-    rows.forEach((row) => {
-      const nameInput = row.querySelector(".ep-name") as HTMLInputElement;
-      const urlInput = row.querySelector(".ep-url") as HTMLInputElement;
-      if (nameInput?.value && urlInput?.value) {
-        models.push({
-          id: `local:${urlInput.value}:default`,
-          label: `${nameInput.value} (Local)`,
-          backend: "local",
-        });
-      }
-    });
+  // Fetch settings to determine which backends are configured
+  let settings: any = {};
+  try {
+    const r = await fetch("http://localhost:3001/api/settings");
+    const j = await r.json();
+    if (j?.ok) settings = j.data || {};
+  } catch (e) {
+    console.error("Failed to fetch settings for model list:", e);
   }
 
-  // Add OpenClaw default
-  models.unshift({ id: "openclaw", label: "OpenClaw (default)", backend: "openclaw" });
+  // OpenClaw
+  if (settings.openclawUrl) {
+    models.push({ id: "openclaw", label: "OpenClaw (default)", backend: "openclaw" });
+  }
 
-  select.innerHTML = '<option value="">Select model...</option>';
+  // OpenAI — only if key is configured
+  if (settings.openaiApiKey) {
+    models.push(
+      { id: "openai:gpt-4o", label: "GPT-4o (OpenAI)", backend: "openai" },
+      { id: "openai:gpt-4o-mini", label: "GPT-4o Mini (OpenAI)", backend: "openai" },
+      { id: "openai:o1", label: "o1 (OpenAI)", backend: "openai" },
+      { id: "openai:o3-mini", label: "o3-mini (OpenAI)", backend: "openai" },
+    );
+  }
+
+  // Anthropic — only if key is configured
+  if (settings.anthropicApiKey) {
+    models.push(
+      { id: "anthropic:claude-sonnet-4-20250514", label: "Claude Sonnet 4 (Anthropic)", backend: "anthropic" },
+      { id: "anthropic:claude-opus-4-20250514", label: "Claude Opus 4 (Anthropic)", backend: "anthropic" },
+      { id: "anthropic:claude-3-haiku-20240307", label: "Claude 3 Haiku (Anthropic)", backend: "anthropic" },
+    );
+  }
+
+  // Local endpoints
+  const endpoints = settings.localEndpoints || [];
+  for (const ep of endpoints) {
+    if (ep.name && ep.baseUrl) {
+      models.push({
+        id: `local:${ep.baseUrl}:default`,
+        label: `${ep.name} (Local)`,
+        backend: "local",
+      });
+    }
+  }
+
+  // Build the select options
+  select.innerHTML = "";
+
+  if (models.length === 0) {
+    // No backends configured — prompt user to configure
+    const opt = document.createElement("option");
+    opt.value = "__configure__";
+    opt.textContent = "⚙️ Configure API keys in settings...";
+    select.appendChild(opt);
+
+    return;
+  }
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Select model...";
+  select.appendChild(placeholder);
+
   for (const m of models) {
     const opt = document.createElement("option");
     opt.value = m.id;
@@ -1068,7 +1160,7 @@ async function saveSettings(): Promise<boolean> {
   if (defaultModel) body.defaultModel = defaultModel;
 
   try {
-    const r = await fetch("https://localhost:3001/api/settings", {
+    const r = await fetch("http://localhost:3001/api/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -1092,18 +1184,28 @@ function setupSettingsUI(): void {
 
   if (!toggle || !panel) return;
 
-  toggle.addEventListener("click", async () => {
+  const overlay = document.getElementById("settings-overlay");
+
+  function openSettings() {
+    overlay?.classList.add("visible");
+    panel.classList.add("visible");
+    loadSettings();
+  }
+  function closeSettings() {
+    overlay?.classList.remove("visible");
+    panel.classList.remove("visible");
+  }
+
+  toggle.addEventListener("click", () => {
     const isVisible = panel.classList.contains("visible");
-    if (isVisible) {
-      panel.classList.remove("visible");
-    } else {
-      await loadSettings();
-      panel.classList.add("visible");
-    }
+    if (isVisible) closeSettings();
+    else openSettings();
   });
 
-  cancelBtn?.addEventListener("click", () => {
-    panel.classList.remove("visible");
+  cancelBtn?.addEventListener("click", closeSettings);
+
+  overlay?.addEventListener("click", (e) => {
+    if (e.target === overlay) closeSettings();
   });
 
   addEndpointBtn?.addEventListener("click", () => {
@@ -1154,7 +1256,7 @@ function setupSettingsUI(): void {
         await loadModels();
         setTimeout(() => {
           statusEl.style.display = "none";
-          panel.classList.remove("visible");
+          overlay?.classList.remove("visible"); panel.classList.remove("visible");
         }, 1500);
       } else {
         statusEl.textContent = "✕ Failed to save settings";

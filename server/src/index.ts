@@ -1,8 +1,10 @@
+import { runAgentLoop } from "./agent-loop";
+import { readConfig } from "./settings";
 import { handleGetSettings, handlePostSettings } from "./settings";
 import express from "express";
 import compression from "compression";
 import cors from "cors";
-import https from "https";
+
 import http from "http";
 import fs from "fs";
 import path from "path";
@@ -19,18 +21,20 @@ app.use(cors());
 app.use(compression());
 app.use(express.json({ limit: "10mb" }));
 
-// ── HTTPS Setup ──
-const certDir = path.join(__dirname, "../../certs");
-let server: http.Server | https.Server;
-let usingHttps = false;
-try {
-  const key = fs.readFileSync(path.join(certDir, "server.key"));
-  const cert = fs.readFileSync(path.join(certDir, "server.crt"));
-  server = https.createServer({ key, cert }, app);
-  usingHttps = true;
-} catch {
-  server = http.createServer(app);
+// ── Static Files (task pane UI) ──
+const appDistCandidates = [
+  path.join(__dirname, "../../app/dist"),        // packaged app & dev
+  path.join(__dirname, "../../../app/dist"),      // fallback
+];
+for (const dir of appDistCandidates) {
+  if (fs.existsSync(dir)) {
+    app.use(express.static(dir));
+    break;
+  }
 }
+
+// ── HTTP Server (localhost only) ──
+const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 // ── State ──
@@ -45,6 +49,68 @@ const promptQueue: PromptEntry[] = [];
 const promptLog = new Map<number, PromptEntry>();
 let promptId = 0;
 const promptWaiters: { resolve: (v: any) => void; timer: NodeJS.Timeout }[] = [];
+
+
+// ── Auto-process prompts via agent loop ──
+async function processPrompt(entry: PromptEntry, ws: any) {
+  try {
+    // Get document context
+    let documentContext = "";
+    try {
+      const doc = await sendCommand("getDocument");
+      documentContext = doc?.text || "";
+    } catch (e: any) {
+      console.error("[agent] Failed to get document:", e.message);
+    }
+
+    // Read config for API keys
+    const config = readConfig();
+    const routerConfig = {
+      openclawUrl: config.openclawUrl,
+      openclawToken: config.openclawToken,
+      openaiApiKey: config.openaiApiKey,
+      anthropicApiKey: config.anthropicApiKey,
+      localEndpoints: config.localEndpoints,
+    };
+
+    const model = entry.model || config.defaultModel || "openclaw";
+
+    // Build prompt with context
+    let fullPrompt = entry.text;
+    if (entry.context) {
+      fullPrompt = `[Selected text: ${entry.context}]\n\n${entry.text}`;
+    }
+
+    // Run agent loop and stream results
+    let fullResponse = "";
+    for await (const chunk of runAgentLoop({
+      prompt: fullPrompt,
+      model,
+      config: routerConfig,
+      documentContext,
+      onToolCall: (call) => {
+        if (ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: `Using tool: ${call.name}...` }));
+        }
+      },
+    })) {
+      fullResponse += chunk;
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: fullResponse }));
+      }
+    }
+
+    // Send final response
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: fullResponse || "(No response)", timestamp: Date.now() }));
+    }
+  } catch (e: any) {
+    console.error("[agent] Error processing prompt:", e.message);
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: `Error: ${e.message}`, timestamp: Date.now() }));
+    }
+  }
+}
 
 // ── WebSocket ──
 wss.on("connection", (ws: any) => {
@@ -70,6 +136,8 @@ wss.on("connection", (ws: any) => {
           w.resolve(entry);
         }
         ws.send(JSON.stringify({ type: "prompt_ack", id: entry.id, clientId: msg.clientId }));
+        // Auto-process the prompt
+        processPrompt(entry, ws).catch(e => console.error("[agent] processPrompt error:", e));
         return;
       }
       if (msg.id !== undefined && pending.has(msg.id)) {
@@ -166,7 +234,7 @@ function apiHandler(command: string, extractParams?: (req: express.Request) => a
 // Health & Meta
 app.get("/api/status", (_req, res) => {
   res.json({ ok: true, data: {
-    version: VERSION, uptime: process.uptime(), https: usingHttps,
+    version: VERSION, uptime: process.uptime(), 
     connected: taskPaneWs !== null && taskPaneWs.readyState === WebSocket.OPEN,
     pendingCommands: pending.size, promptQueueSize: promptQueue.length,
   }});
@@ -309,7 +377,7 @@ app.post("/api/batch", apiHandler("batch"));
 // Start
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`\n  🎀 The Sidebar Server v${VERSION}`);
-  console.log(`  ${usingHttps ? "🔒 HTTPS" : "⚠️  HTTP"} on port ${PORT}`);
+  console.log(`  ${"🌐 HTTP (localhost)"} on port ${PORT}`);
   console.log(`  📡 WebSocket waiting for connections...\n`);
 });
 
