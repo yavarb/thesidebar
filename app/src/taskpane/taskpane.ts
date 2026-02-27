@@ -2590,7 +2590,7 @@ const QUICK_ACTIONS_DEFAULTS: QuickActionCategory[] = [
     actions: [
       { name: "Check Bluebook", prompt: "Review all citations in this document for Bluebook formatting errors. List each error with the paragraph number, the incorrect citation, and the corrected version." },
       { name: "Long/Short Cites", prompt: "Check that every short citation in this document has a corresponding full citation earlier in the document. Flag any short cites that don't match a prior long cite, and any long cites that are repeated unnecessarily." },
-      { name: "TOA Pages", prompt: "Use the checkToaPages tool to export this document to PDF, parse the actual page numbers where each citation appears, and compare them against the page numbers listed in the Table of Authorities. Report every discrepancy: citations with wrong pages, missing pages, and extra pages." },
+      { name: "TOA Pages", prompt: "__DIRECT_ACTION__checkToaPages" },
       { name: "Find Uncited", prompt: "Identify any factual assertions in this document that lack a supporting citation or footnote." },
     ]
   },
@@ -2676,7 +2676,86 @@ async function resolvePromptVariables(prompt: string): Promise<string> {
   return resolved;
 }
 
+
+async function runDirectAction(action: string, displayLabel: string): Promise<void> {
+  const history = document.getElementById("prompt-history");
+  if (!history) return;
+
+  // Show user message
+  appendChatEntry("user", displayLabel);
+
+  // Show progress
+  const progressEl = document.createElement("div");
+  progressEl.className = "chat-entry chat-assistant";
+  const roleEl = document.createElement("div");
+  roleEl.className = "chat-role";
+  roleEl.textContent = "The Sidebar";
+  const textEl = document.createElement("div");
+  textEl.className = "chat-text streaming-cursor";
+  textEl.textContent = "⚖️ Exporting document to PDF and checking page numbers...";
+  progressEl.appendChild(roleEl);
+  progressEl.appendChild(textEl);
+  history.appendChild(progressEl);
+  history.scrollTo({ top: history.scrollHeight, behavior: "smooth" });
+
+  try {
+    const res = await fetch(`http://localhost:3001/api/toa/check`, { method: "POST" });
+    const data = await res.json();
+    
+    if (data.error) {
+      textEl.classList.remove("streaming-cursor");
+      textEl.innerHTML = `<strong>Error:</strong> ${data.error}`;
+      return;
+    }
+
+    const results = data.results || [];
+    let html = `<strong>Table of Authorities Check</strong><br>`;
+    html += `<span style="font-size:11px;opacity:0.7">${data.totalEntries} entries checked</span><br><br>`;
+
+    const correct = results.filter((r: any) => r.status === "correct");
+    const incorrect = results.filter((r: any) => r.status === "incorrect");
+    const notFound = results.filter((r: any) => r.status === "not_found");
+    const passim = results.filter((r: any) => r.status === "passim");
+
+    if (incorrect.length === 0 && notFound.length === 0) {
+      html += `✅ <strong>All page numbers are correct!</strong><br>`;
+      html += `${correct.length} correct, ${passim.length} passim`;
+    } else {
+      if (incorrect.length > 0) {
+        html += `❌ <strong>${incorrect.length} incorrect:</strong><br>`;
+        for (const r of incorrect) {
+          html += `<div style="margin:4px 0 4px 8px;font-size:12px">• <em>${r.entry.substring(0, 60)}${r.entry.length > 60 ? "..." : ""}</em><br>`;
+          html += `&nbsp;&nbsp;Listed: <strong>${r.listedPages}</strong> → Actual: <strong>${r.actualPages.join(", ")}</strong>`;
+          if (r.details) html += `<br>&nbsp;&nbsp;<span style="opacity:0.7">${r.details}</span>`;
+          html += `</div>`;
+        }
+      }
+      if (notFound.length > 0) {
+        html += `<br>⚠️ <strong>${notFound.length} not found in document:</strong><br>`;
+        for (const r of notFound) {
+          html += `<div style="margin:4px 0 4px 8px;font-size:12px">• <em>${r.entry.substring(0, 60)}${r.entry.length > 60 ? "..." : ""}</em></div>`;
+        }
+      }
+      if (correct.length > 0) html += `<br>✅ ${correct.length} correct`;
+      if (passim.length > 0) html += `, ${passim.length} passim`;
+    }
+
+    textEl.classList.remove("streaming-cursor");
+    textEl.innerHTML = html;
+  } catch (e: any) {
+    textEl.classList.remove("streaming-cursor");
+    textEl.innerHTML = `<strong>Error:</strong> ${e.message || "Failed to check TOA"}`;
+  }
+  history.scrollTo({ top: history.scrollHeight, behavior: "smooth" });
+}
+
 async function executeQuickAction(prompt: string, displayLabel?: string): Promise<void> {
+  // Handle direct server actions (no LLM needed)
+  if (prompt.startsWith("__DIRECT_ACTION__")) {
+    const action = prompt.substring("__DIRECT_ACTION__".length);
+    await runDirectAction(action, displayLabel || action);
+    return;
+  }
   const resolved = await resolvePromptVariables(prompt);
   const input = document.getElementById("prompt-input") as HTMLTextAreaElement;
   if (input) {
