@@ -80,6 +80,7 @@ const DEFAULT_TIMEOUT = 15000;
 // ── Prompt Conversation UI State ──
 const pendingPromptEls = new Map<string, HTMLElement>();
 let selectedModel = "";
+let currentDocSessionId: string | null = null;
 
 function addThinkingIndicator(): HTMLElement {
   const history = document.getElementById("prompt-history")!;
@@ -149,8 +150,129 @@ Office.onReady((info) => {
     void loadModels();
     setupSettingsUI();
     connectWebSocket();
+    // Initialize document session after WebSocket connects
+    setTimeout(() => initSession(), 1000);
   }
 });
+
+// ── Session Persistence ──
+
+/** Read SidebarSessionId from Word custom properties */
+async function getDocSessionId(): Promise<string | null> {
+  try {
+    return await Word.run(async (context) => {
+      const props = context.document.properties.customProperties;
+      props.load("items");
+      await context.sync();
+      for (const prop of props.items) {
+        if (prop.key === "SidebarSessionId") {
+          prop.load("value");
+          await context.sync();
+          return prop.value as string;
+        }
+      }
+      return null;
+    });
+  } catch (e) {
+    console.error("[session] Failed to read doc property:", e);
+    return null;
+  }
+}
+
+/** Write SidebarSessionId to Word custom properties */
+async function setDocSessionId(sessionId: string): Promise<void> {
+  try {
+    await Word.run(async (context) => {
+      context.document.properties.customProperties.add("SidebarSessionId", sessionId);
+      await context.sync();
+    });
+  } catch (e) {
+    console.error("[session] Failed to write doc property:", e);
+  }
+}
+
+/** Remove all Sidebar-related custom properties from the document */
+async function removeAITraces(): Promise<number> {
+  let removed = 0;
+  try {
+    await Word.run(async (context) => {
+      const props = context.document.properties.customProperties;
+      props.load("items");
+      await context.sync();
+      for (const prop of props.items) {
+        prop.load("key");
+      }
+      await context.sync();
+      for (const prop of props.items) {
+        if (prop.key.toLowerCase().includes("sidebar")) {
+          prop.delete();
+          removed++;
+        }
+      }
+      await context.sync();
+    });
+  } catch (e) {
+    console.error("[session] Failed to remove AI traces:", e);
+  }
+  return removed;
+}
+
+/** Initialize or resume a document session */
+async function initSession(): Promise<void> {
+  const existingId = await getDocSessionId();
+  if (existingId) {
+    // Try to resume
+    try {
+      const r = await fetch("http://localhost:3001/api/session/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: existingId }),
+      });
+      const j = await r.json();
+      if (j?.ok && j.data?.found) {
+        currentDocSessionId = existingId;
+        if (j.data.conversationHistory?.length) {
+          repopulateChat(j.data.conversationHistory);
+        }
+        console.log("[session] Resumed:", existingId);
+        return;
+      }
+    } catch (e) {
+      console.error("[session] Resume failed:", e);
+    }
+  }
+  // Start fresh session
+  await createNewSession();
+}
+
+/** Create a new session and write ID to document */
+async function createNewSession(): Promise<string> {
+  try {
+    const r = await fetch("http://localhost:3001/api/session/new", { method: "POST" });
+    const j = await r.json();
+    if (j?.ok && j.data?.sessionId) {
+      currentDocSessionId = j.data.sessionId;
+      await setDocSessionId(j.data.sessionId);
+      console.log("[session] Created new:", j.data.sessionId);
+      return j.data.sessionId;
+    }
+  } catch (e) {
+    console.error("[session] Failed to create:", e);
+  }
+  return "";
+}
+
+/** Repopulate chat UI from conversation history */
+function repopulateChat(history: { role: string; content: string }[]): void {
+  const historyEl = document.getElementById("prompt-history");
+  if (!historyEl) return;
+  historyEl.innerHTML = "";
+  for (const msg of history) {
+    if (msg.role === "user" || msg.role === "assistant") {
+      appendChatEntry(msg.role as "user" | "assistant", msg.content);
+    }
+  }
+}
 
 // ── Prompt UI ──
 function setupPromptUI() {
@@ -202,11 +324,10 @@ function setupPromptUI() {
   const newChatBtn = document.getElementById("new-chat-btn");
   if (newChatBtn) {
     newChatBtn.addEventListener("click", async () => {
-      try {
-        await fetch("http://localhost:3001/api/session/new", { method: "POST" });
-      } catch (e) {
-        console.error("Failed to reset session:", e);
-      }
+      // Delete old session on server
+      try { await fetch("http://localhost:3001/api/session/delete", { method: "POST" }); } catch {}
+      // Create new session and write to doc
+      await createNewSession();
       // Clear chat UI
       const history = document.getElementById("prompt-history");
       if (history) history.innerHTML = "";
@@ -341,6 +462,45 @@ function connectWebSocket() {
               revertBtn.setAttribute("data-exchange-id", String(msg.exchangeId));
               revertBtn.addEventListener("click", () => handleRevert(revertBtn, msg.exchangeId));
               el.appendChild(revertBtn);
+            }
+            // Add change summaries if present
+            if (msg.changeSummaries && msg.changeSummaries.length > 0) {
+              const summaryDiv = document.createElement("div");
+              summaryDiv.className = "change-summary";
+              const collapsed = msg.changeSummaries.length > 5;
+              const header = document.createElement("div");
+              header.className = "change-summary-header";
+              header.textContent = `\ud83d\udcdd Changes (${msg.changeSummaries.length})`;
+              header.addEventListener("click", () => {
+                const lines = summaryDiv.querySelector(".change-summary-lines") as HTMLElement;
+                if (lines) {
+                  const isHidden = lines.style.display === "none";
+                  lines.style.display = isHidden ? "block" : "none";
+                  header.classList.toggle("expanded", isHidden);
+                }
+              });
+              summaryDiv.appendChild(header);
+              const linesDiv = document.createElement("div");
+              linesDiv.className = "change-summary-lines";
+              if (collapsed) linesDiv.style.display = "none";
+              for (const line of msg.changeSummaries) {
+                const lineEl = document.createElement("div");
+                lineEl.className = "change-line";
+                // Highlight old→new text with colors
+                const arrowMatch = line.match(/^(.+?)"(.+?)"\s*\u2192\s*"(.+?)"(.*)$/);
+                if (arrowMatch) {
+                  lineEl.innerHTML = escapeHtml(arrowMatch[1]) +
+                    '"<span class="old-text">' + escapeHtml(arrowMatch[2]) + '</span>"' +
+                    ' → ' +
+                    '"<span class="new-text">' + escapeHtml(arrowMatch[3]) + '</span>"' +
+                    escapeHtml(arrowMatch[4]);
+                } else {
+                  lineEl.textContent = line;
+                }
+                linesDiv.appendChild(lineEl);
+              }
+              summaryDiv.appendChild(linesDiv);
+              el.appendChild(summaryDiv);
             }
             userEl.insertAdjacentElement("afterend", el);
             inserted = true;

@@ -32,6 +32,8 @@ export interface SidebarConfig {
   defaultModel?: string;
   /** Percentage of context window to use for conversation history (default 40) */
   contextBudgetPercent?: number;
+  /** Session TTL in days. Default 30. 0 or -1 means forever. */
+  sessionTTLDays?: number;
 }
 
 /** Sensitive field names that should be masked in GET responses */

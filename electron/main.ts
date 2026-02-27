@@ -346,6 +346,17 @@ function updateTrayMenu(): void {
     { type: "separator" },
     { label: "Reinstall Word Add-in", click: () => { installWordAddin(); dialog.showMessageBox({ type: "info", title: "The Sidebar", message: "Add-in manifest reinstalled. Restart Word." }); } },
     { label: "Open Config Directory", click: () => shell.openPath(CONFIG_DIR) },
+    { label: "Purge All Sessions…", click: async () => {
+      const { response } = await dialog.showMessageBox({ type: "warning", title: "Purge All Sessions", message: "This will permanently delete all conversation history for all documents.", buttons: ["Cancel", "Purge All"], defaultId: 0, cancelId: 0 });
+      if (response !== 1) return;
+      try {
+        const req = http.request({ hostname: "127.0.0.1", port: SERVER_PORT, path: "/api/sessions/purge", method: "POST" }, (res) => {
+          let body = ""; res.on("data", (c: Buffer) => body += c); res.on("end", () => { log("[tray] Purge result: " + body); dialog.showMessageBox({ type: "info", title: "The Sidebar", message: "All sessions purged." }); });
+        });
+        req.on("error", (e: Error) => dialog.showErrorBox("The Sidebar", "Purge failed: " + e.message));
+        req.end();
+      } catch (e: any) { dialog.showErrorBox("The Sidebar", "Purge failed: " + e.message); }
+    }},
   );
 
   if (pendingUpdate) {

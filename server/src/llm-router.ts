@@ -64,6 +64,24 @@ export interface PromptContext {
   sessionUser?: string;
 }
 
+/** Cache statistics for prompt caching */
+export interface CacheStats {
+  hits: number;
+  misses: number;
+  anthropicCacheReadTokens: number;
+  anthropicCacheCreationTokens: number;
+  openaiCachedTokens: number;
+}
+
+/** Global cache stats singleton */
+export const cacheStats: CacheStats = {
+  hits: 0,
+  misses: 0,
+  anthropicCacheReadTokens: 0,
+  anthropicCacheCreationTokens: 0,
+  openaiCachedTokens: 0,
+};
+
 // ── Helpers ──
 
 /**
@@ -203,7 +221,7 @@ export async function* routeOpenAI(
   if (context.messages) messages.push(...context.messages);
   messages.push({ role: "user", content: prompt });
 
-  const body: any = { model, messages, stream: true };
+  const body: any = { model, messages, stream: true, stream_options: { include_usage: true } };
   if (context.tools?.length) body.tools = context.tools;
 
   const res = await httpRequest("https://api.openai.com/v1/chat/completions", {
@@ -225,6 +243,13 @@ export async function* routeOpenAI(
     for (const event of events) {
       try {
         const parsed = JSON.parse(event);
+        // Track OpenAI cache usage from final chunk
+        if (parsed.usage?.prompt_tokens_details?.cached_tokens) {
+          const cached = parsed.usage.prompt_tokens_details.cached_tokens;
+          cacheStats.openaiCachedTokens += cached;
+          cacheStats.hits++;
+          console.log(`[cache] OpenAI cache hit: ${cached} cached tokens`);
+        }
         const delta = parsed.choices?.[0]?.delta;
         if (delta?.tool_calls) {
           yield JSON.stringify({ type: "tool_calls", delta: delta.tool_calls });
@@ -253,12 +278,17 @@ export async function* routeAnthropic(
   if (context.messages) messages.push(...context.messages);
   messages.push({ role: "user", content: prompt });
 
-  const systemParts: string[] = [];
-  if (context.systemPrompt) systemParts.push(context.systemPrompt);
-  if (context.documentContext) systemParts.push(`Current document context:\n${context.documentContext}`);
+  // Structure system as array of content blocks for optimal caching
+  const systemBlocks: any[] = [];
+  if (context.systemPrompt) {
+    systemBlocks.push({ type: "text", text: context.systemPrompt, cache_control: { type: "ephemeral" } });
+  }
+  if (context.documentContext) {
+    systemBlocks.push({ type: "text", text: `Current document context:\n${context.documentContext}`, cache_control: { type: "ephemeral" } });
+  }
 
   const body: any = { model, messages, max_tokens: 4096, stream: true };
-  if (systemParts.length) body.system = systemParts.join("\n\n");
+  if (systemBlocks.length) body.system = systemBlocks;
 
   if (context.tools?.length) {
     body.tools = context.tools.map((t: any) => ({
@@ -291,7 +321,24 @@ export async function* routeAnthropic(
     for (const event of events) {
       try {
         const parsed = JSON.parse(event);
-        if (parsed.type === "content_block_delta") {
+        if (parsed.type === "message_start" && parsed.message?.usage) {
+          const usage = parsed.message.usage;
+          if (usage.cache_read_input_tokens) {
+            cacheStats.anthropicCacheReadTokens += usage.cache_read_input_tokens;
+            cacheStats.hits++;
+            console.log(`[cache] Anthropic cache hit: ${usage.cache_read_input_tokens} tokens read from cache`);
+          } else {
+            cacheStats.misses++;
+          }
+          if (usage.cache_creation_input_tokens) {
+            cacheStats.anthropicCacheCreationTokens += usage.cache_creation_input_tokens;
+          }
+        } else if (parsed.type === "message_delta" && parsed.usage) {
+          // Final usage update
+          if (parsed.usage.cache_read_input_tokens) {
+            cacheStats.anthropicCacheReadTokens += parsed.usage.cache_read_input_tokens;
+          }
+        } else if (parsed.type === "content_block_delta") {
           if (parsed.delta?.type === "text_delta") yield parsed.delta.text;
           else if (parsed.delta?.type === "input_json_delta") {
             yield JSON.stringify({ type: "tool_input_delta", delta: parsed.delta.partial_json });

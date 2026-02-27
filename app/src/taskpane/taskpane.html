@@ -564,6 +564,50 @@
       30% { transform: translateY(-4px); opacity: 1; }
     }
 
+    /* ===== Session management ===== */
+    .session-management {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border-color);
+    }
+    .session-management h4 {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin-bottom: 10px;
+    }
+    .session-management .session-btns {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .btn-session-clear {
+      padding: 7px 12px;
+      border: 1px solid var(--input-border);
+      border-radius: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      background: var(--btn-cancel-bg);
+      color: var(--btn-cancel-text);
+      transition: background 0.15s;
+      text-align: left;
+    }
+    .btn-session-clear:hover { background: var(--btn-cancel-hover); }
+    .btn-session-purge {
+      padding: 7px 12px;
+      border: 1px solid #ef4444;
+      border-radius: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      background: transparent;
+      color: #ef4444;
+      transition: background 0.15s, color 0.15s;
+      text-align: left;
+    }
+    .btn-session-purge:hover { background: #ef4444; color: #fff; }
+
     /* ===== Scrollbar for settings ===== */
     #settings-panel::-webkit-scrollbar { width: 4px; }
     #settings-panel::-webkit-scrollbar-track { background: transparent; }
@@ -625,6 +669,37 @@
     .chat-user .chat-text pre { background: rgba(99,102,241,0.08); }
     .chat-user .chat-text a { color: #4f46e5; }
 
+
+    /* ===== Change Summaries ===== */
+    .change-summary {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border-color);
+      font-size: 11.5px;
+    }
+    .change-summary-header {
+      cursor: pointer;
+      color: var(--text-secondary);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      user-select: none;
+    }
+    .change-summary-header:hover { color: var(--text-primary); }
+    .change-summary-header::before { content: "▶ "; font-size: 9px; }
+    .change-summary-header.expanded::before { content: "▼ "; }
+    .change-summary-lines { margin-top: 4px; }
+    .change-line {
+      font-family: 'SF Mono', monospace;
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+      padding: 1px 0;
+      padding-left: 8px;
+    }
+    .change-line .old-text { color: #ef4444; text-decoration: line-through; }
+    .change-line .new-text { color: #22c55e; }
   </style>
 </head>
 <body>
@@ -676,6 +751,15 @@
           <select id="settings-default-model">
             <option value="">Select model...</option>
           </select>
+        </div>
+        <div class="session-management">
+          <h4>Session Management</h4>
+          <div class="session-btns">
+            <button class="btn-session-clear" id="session-clear-doc">Clear This Document's History</button>
+            <button class="btn-session-purge" id="session-purge-all">Purge All Sessions</button>
+            <button class="btn-session-clear" id="session-remove-traces" style="margin-top:4px;">🧹 Remove AI Traces from Document</button>
+            <div style="font-size:10px;color:var(--text-secondary);margin-top:4px;line-height:1.4;">Removes all Sidebar metadata from this document. The document will have no trace of AI usage.</div>
+          </div>
         </div>
         <div class="settings-actions">
           <button class="btn-cancel" id="settings-cancel">Cancel</button>

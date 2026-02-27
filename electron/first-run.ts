@@ -13,6 +13,7 @@
 import { dialog } from "electron";
 
 import fs from "fs";
+import crypto from "crypto";
 import path from "path";
 
 const CONFIG_DIR = path.join(process.env.HOME || "~", ".thesidebar");
@@ -34,6 +35,20 @@ export async function firstRunSetup(
   if (!fs.existsSync(CONFIG_DIR)) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
     log("[setup] Created ~/.thesidebar/");
+  }
+
+  // Generate machine key for session encryption
+  const machineKeyPath = path.join(CONFIG_DIR, ".machine-key");
+  if (!fs.existsSync(machineKeyPath)) {
+    fs.writeFileSync(machineKeyPath, crypto.randomBytes(32), { mode: 0o600 });
+    log("[setup] Generated machine key");
+  }
+
+  // Create sessions directory
+  const sessionsDir = path.join(CONFIG_DIR, "sessions");
+  if (!fs.existsSync(sessionsDir)) {
+    fs.mkdirSync(sessionsDir, { recursive: true, mode: 0o700 });
+    log("[setup] Created sessions directory");
   }
 
   // Create logs directory

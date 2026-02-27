@@ -1,6 +1,8 @@
 import { runAgentLoop } from "./agent-loop";
+import { v4 as uuidv4 } from "uuid";
+import { saveSession, loadSession, deleteSession, cleanExpiredSessions, ensureMachineKey, SessionData } from "./sessions";
 import { getContextSize, manageContext } from "./context";
-import { resolveModel } from "./llm-router";
+import { resolveModel, cacheStats } from "./llm-router";
 import { readConfig } from "./settings";
 import { handleGetSettings, handlePostSettings } from "./settings";
 import express from "express";
@@ -44,6 +46,42 @@ const wss = new WebSocketServer({ server });
 let sessionId = "sidebar-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
 /** Conversation history for non-OpenClaw models */
 let conversationHistory: { role: string; content: string }[] = [];
+let currentSessionData: SessionData | null = null;
+// ── In-Memory Document Index ──
+let documentIndex: { paragraphs: {index: number, text: string, listString?: string}[], builtAt: number, hash: string } | null = null;
+
+async function buildDocumentIndex(): Promise<typeof documentIndex> {
+  try {
+    const result = await sendCommand("getParagraphs", { compact: true });
+    const paragraphs = (result?.paragraphs || []).map((p: any) => ({
+      index: p.index,
+      text: p.text,
+      listString: p.listString,
+    }));
+    const raw = paragraphs.map((p: any) => p.text).join("");
+    const hash = raw.substring(0, 100) + "|" + paragraphs.length;
+    documentIndex = { paragraphs, builtAt: Date.now(), hash };
+    console.log(`[index] Built document index: ${paragraphs.length} paragraphs`);
+    return documentIndex;
+  } catch (e: any) {
+    console.error("[index] Failed to build:", e.message);
+    return null;
+  }
+}
+
+async function getDocumentContext(): Promise<string> {
+  if (documentIndex && (Date.now() - documentIndex.builtAt) < 30000) {
+    return documentIndex.paragraphs.map(p => p.text).join("\n");
+  }
+  await buildDocumentIndex();
+  return documentIndex ? documentIndex.paragraphs.map(p => p.text).join("\n") : "";
+}
+
+function invalidateIndex(): void {
+  if (documentIndex) {
+    documentIndex.builtAt = 0; // Mark as stale
+  }
+}
 
 /** Single task pane WebSocket connection (localhost only) */
 let taskPaneWs: WebSocket | null = null;
@@ -69,13 +107,34 @@ let exchangeIdCounter = 0;
 
 
 // ── Auto-process prompts via agent loop ──
+// ── Tool Progress Messages ──
+const TOOL_PROGRESS: Record<string, (args: any) => string> = {
+  readDocument: () => "📖 Reading document...",
+  readParagraphs: (a: any) => `📖 Reading paragraphs ${a.from || ''}–${a.to || ''}...`,
+  getParagraph: (a: any) => `📖 Reading paragraph ${a.index}...`,
+  getParagraphs: () => "📖 Reading paragraphs...",
+  updateParagraph: (a: any) => `✏️ Editing paragraph ${a.index}...`,
+  replaceParagraph: (a: any) => `✏️ Editing paragraph ${a.index || a.listString || ''}...`,
+  replaceSelection: () => "✏️ Replacing selection...",
+  find: (a: any) => `🔍 Searching for "${(a.text || '').slice(0, 30)}..."`,
+  findReplace: (a: any) => `🔍 Replacing "${(a.search || a.text || '').slice(0, 20)}" → "${(a.replace || a.replacement || '').slice(0, 20)}"...`,
+  insert: (a: any) => `📝 Inserting at paragraph ${a.paragraphIndex || a.index || 'end'}...`,
+  addFootnote: () => "📝 Adding footnote...",
+  updateFootnote: (a: any) => `📝 Updating footnote ${a.index}...`,
+  format: () => "🎨 Formatting...",
+  setStyleFont: () => "🎨 Updating style font...",
+  addComment: () => "💬 Adding comment...",
+  getDocumentStructure: () => "📋 Analyzing structure...",
+  getDocumentStats: () => "📋 Getting document stats...",
+  batch: () => "⚡ Executing batch operations...",
+};
+
 async function processPrompt(entry: PromptEntry, ws: any) {
   try {
-    // Get document context
+    // Get document context (from cache if fresh)
     let documentContext = "";
     try {
-      const doc = await sendCommand("getDocument");
-      documentContext = doc?.text || "";
+      documentContext = await getDocumentContext();
     } catch (e: any) {
       console.error("[agent] Failed to get document:", e.message);
     }
@@ -129,6 +188,7 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     const currentExchangeId = ++exchangeIdCounter;
     let modifyingCallCount = 0;
     let fullResponse = "";
+    let changeSummaries: string[] = [];
     for await (const chunk of runAgentLoop({
       prompt: fullPrompt,
       model,
@@ -137,12 +197,24 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       sessionUser: isOpenClaw ? sessionId : undefined,
       conversationHistory: !isOpenClaw ? managedHistory : undefined,
       onToolCall: (call) => {
-        if (MODIFYING_TOOLS.has(call.name)) modifyingCallCount++;
+        if (MODIFYING_TOOLS.has(call.name)) {
+          modifyingCallCount++;
+          invalidateIndex();
+        }
         if (ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: `Using tool: ${call.name}...` }));
+          const progressFn = TOOL_PROGRESS[call.name];
+          const progressText = progressFn ? progressFn(call.arguments) : `Using tool: ${call.name}...`;
+          ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, progressText }));
         }
       },
     })) {
+      // Check for change summaries marker
+      if (chunk.startsWith("\n__CHANGE_SUMMARIES__")) {
+        try {
+          changeSummaries = JSON.parse(chunk.substring("\n__CHANGE_SUMMARIES__".length));
+        } catch {}
+        continue;
+      }
       fullResponse += chunk;
       if (ws.readyState === 1) {
         ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: fullResponse }));
@@ -154,6 +226,13 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)" });
     // Keep history bounded
     if (conversationHistory.length > 40) conversationHistory = conversationHistory.slice(-20);
+
+    // Auto-save session
+    if (currentSessionData) {
+      currentSessionData.conversationHistory = [...conversationHistory];
+      currentSessionData.model = model;
+      saveSession(currentSessionData);
+    }
 
     // Track undo count for this exchange
     const hasChanges = modifyingCallCount > 0;
@@ -168,7 +247,7 @@ async function processPrompt(entry: PromptEntry, ws: any) {
 
     // Send final response
     if (ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: fullResponse || "(No response)", timestamp: Date.now(), hasChanges, exchangeId: currentExchangeId }));
+      ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: fullResponse || "(No response)", timestamp: Date.now(), hasChanges, exchangeId: currentExchangeId, changeSummaries: changeSummaries.length > 0 ? changeSummaries : undefined }));
     }
   } catch (e: any) {
     console.error("[agent] Error processing prompt:", e.message);
@@ -188,6 +267,9 @@ wss.on("connection", (ws: any) => {
   ws._wrAlive = true;
 
   ws.on("pong", () => { ws._wrAlive = true; });
+
+  // Auto-build document index when task pane connects
+  buildDocumentIndex().catch(e => console.error("[index] Auto-build failed:", e.message));
 
   ws.on("message", (raw: any) => {
     try {
@@ -306,6 +388,19 @@ app.get("/api/status", (_req, res) => {
   }});
 });
 
+// Cache stats endpoint
+app.get("/api/cache/stats", (_req, res) => {
+  res.json({ ok: true, data: cacheStats });
+});
+app.post("/api/cache/stats/reset", (_req, res) => {
+  cacheStats.hits = 0;
+  cacheStats.misses = 0;
+  cacheStats.anthropicCacheReadTokens = 0;
+  cacheStats.anthropicCacheCreationTokens = 0;
+  cacheStats.openaiCachedTokens = 0;
+  res.json({ ok: true, data: { reset: true } });
+});
+
 app.get("/api/help", (_req, res) => {
   res.json({ ok: true, data: { version: VERSION, endpoints: [
     { m: "GET", p: "/api/status", d: "Server status" },
@@ -389,6 +484,16 @@ app.get("/api/index/headings", apiHandler("getHeadings"));
 app.get("/api/index/range", apiHandler("getIndexRange", (req) => ({ from: req.query.from ? parseInt(req.query.from as string, 10) : undefined, to: req.query.to ? parseInt(req.query.to as string, 10) : undefined })));
 app.post("/api/index/delta", apiHandler("getDelta"));
 
+// Force refresh server-side document index
+app.post("/api/index/refresh", async (_req, res) => {
+  try {
+    const idx = await buildDocumentIndex();
+    res.json({ ok: true, data: { paragraphCount: idx?.paragraphs.length || 0, hash: idx?.hash || "" } });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // Document
 app.get("/api/document", apiHandler("getDocument"));
 app.get("/api/document/paragraphs", apiHandler("getParagraphs", (req) => ({ from: req.query.from ? parseInt(req.query.from as string, 10) : undefined, to: req.query.to ? parseInt(req.query.to as string, 10) : undefined, compact: req.query.compact === "true" })));
@@ -471,11 +576,74 @@ app.post("/api/revert/:exchangeId", async (req: express.Request, res: express.Re
 // Start
 // ── Session Management ──
 app.post("/api/session/new", (_req, res) => {
-  sessionId = "sidebar-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+  const newId = uuidv4();
   conversationHistory = [];
-  console.log("[session] New session:", sessionId);
-  res.json({ ok: true, data: { sessionId } });
+  const config = readConfig();
+  currentSessionData = {
+    sessionId: newId,
+    conversationHistory: [],
+    model: config.defaultModel || "openclaw",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    documentName: undefined,
+  };
+  saveSession(currentSessionData);
+  sessionId = "sidebar-" + newId; // Keep OpenClaw session prefix
+  console.log("[session] New session:", newId);
+  res.json({ ok: true, data: { sessionId: newId } });
 });
+
+app.post("/api/session/resume", (req, res) => {
+  const { sessionId: sid } = req.body || {};
+  if (!sid) return res.status(400).json({ ok: false, error: "sessionId required" });
+  const data = loadSession(sid);
+  if (!data) return res.json({ ok: true, data: { found: false } });
+  currentSessionData = data;
+  conversationHistory = [...data.conversationHistory];
+  sessionId = "sidebar-" + sid;
+  console.log("[session] Resumed session:", sid, "("+data.conversationHistory.length+" messages)");
+  res.json({ ok: true, data: { found: true, conversationHistory: data.conversationHistory, model: data.model } });
+});
+
+app.post("/api/session/delete", (_req, res) => {
+  if (currentSessionData) {
+    deleteSession(currentSessionData.sessionId);
+    console.log("[session] Deleted session:", currentSessionData.sessionId);
+  }
+  conversationHistory = [];
+  currentSessionData = null;
+  res.json({ ok: true });
+});
+
+app.post("/api/sessions/purge", (_req, res) => {
+  const sessionsDir = require("path").join(process.env.HOME || "~", ".thesidebar", "sessions");
+  let count = 0;
+  try {
+    const files = require("fs").readdirSync(sessionsDir);
+    for (const f of files) {
+      if (f.endsWith(".enc")) {
+        require("fs").unlinkSync(require("path").join(sessionsDir, f));
+        count++;
+      }
+    }
+  } catch {}
+  conversationHistory = [];
+  currentSessionData = null;
+  console.log("[session] Purged " + count + " sessions");
+  res.json({ ok: true, data: { purged: count } });
+});
+
+// ── Session Init ──
+ensureMachineKey();
+
+// Periodic session cleanup
+const config_init = readConfig();
+const ttl = config_init.sessionTTLDays ?? 30;
+cleanExpiredSessions(ttl);
+setInterval(() => {
+  const c = readConfig();
+  cleanExpiredSessions(c.sessionTTLDays ?? 30);
+}, 3600000); // every hour
 
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`\n  🎀 The Sidebar Server v${VERSION}`);
