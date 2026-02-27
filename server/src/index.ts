@@ -328,6 +328,13 @@ To use a tool, make an HTTP request to http://localhost:3001/api/<endpoint>. Do 
       }
       // Skip internal control markers
       if (chunk === "\n__TOOL_EXEC_START__") continue;
+      if (chunk.startsWith("\n__TOOL_PHASE__")) {
+        try {
+          const info = JSON.parse(chunk.substring("\n__TOOL_PHASE__".length));
+          ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, status: "tool_phase", toolCount: info.toolCount, tools: info.tools }));
+        } catch {}
+        continue;
+      }
       fullResponse += chunk;
       if (ws.readyState === 1) {
         ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: fullResponse }));

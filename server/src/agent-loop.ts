@@ -448,6 +448,9 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
       return;
     }
 
+    // Signal that tools are about to execute (UI should keep "working" indicator)
+    yield "\n__TOOL_PHASE__" + JSON.stringify({ toolCount: toolCalls.length, tools: toolCalls.map(tc => tc.name) });
+
     // Add assistant's tool call response to history
     messages.push({ role: "assistant", content: fullText || `[Tool calls: ${toolCalls.map(tc => tc.name).join(", ")}]` });
 

@@ -488,6 +488,16 @@ function connectWebSocket() {
 
         const history = document.getElementById("prompt-history")!;
 
+        // Handle tool phase — model sent text but is now executing tools
+        if (toolStatus === "tool_phase") {
+          // Re-add thinking indicator with "Executing..." label
+          removeThinkingIndicator();
+          const indicator = addThinkingIndicator();
+          const elapsed = indicator.querySelector(".thinking-elapsed") as HTMLElement;
+          if (elapsed) elapsed.textContent = "Executing edits...";
+          return;
+        }
+
         // Handle tool execution progress
         if (toolStatus === "tool" && toolName) {
           removeThinkingIndicator();
