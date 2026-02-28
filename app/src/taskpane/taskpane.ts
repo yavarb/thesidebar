@@ -1101,7 +1101,7 @@ async function handleCommand(command: string, params: any): Promise<any> {
 
     case "insert":
       return Word.run(async (ctx) => {
-        const { text, location, paragraphIndex, style } = params || {};
+        const { text, location, paragraphIndex, style, allowEnd } = params || {};
         if (!text) throw new Error("params.text required");
         let paragraph: Word.Paragraph;
         if (paragraphIndex !== undefined) {
@@ -1110,8 +1110,10 @@ async function handleCommand(command: string, params: any): Promise<any> {
           paragraph = paragraphs.items[paragraphIndex].insertParagraph(text, location === "before" ? Word.InsertLocation.before : Word.InsertLocation.after);
         } else if (location === "start") {
           paragraph = ctx.document.body.insertParagraph(text, Word.InsertLocation.start);
-        } else {
+        } else if (location === "end" && allowEnd === true) {
           paragraph = ctx.document.body.insertParagraph(text, Word.InsertLocation.end);
+        } else {
+          throw new Error('Unsafe insert blocked: provide paragraphIndex (+ before/after) for targeted insertion. End-of-document insert requires { location: "end", allowEnd: true }.');
         }
         if (style) paragraph.style = style;
         paragraph.load("text,style"); await ctx.sync();

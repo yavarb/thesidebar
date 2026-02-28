@@ -191,13 +191,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "insertText",
-      description: "Insert a new paragraph at a specified position in the document.",
+      description: "Insert a new paragraph in the document. For targeted insertion, provide paragraphIndex with location 'before' or 'after'. End insertion is blocked unless explicitly allowed.",
       parameters: {
         type: "object",
         properties: {
           text: { type: "string", description: "Text to insert" },
-          position: { type: "string", enum: ["before", "after", "end", "start"], description: "Where to insert relative to the reference index" },
-          index: { type: "number", description: "Reference paragraph index" },
+          location: { type: "string", enum: ["before", "after", "end", "start"], description: "Where to insert" },
+          paragraphIndex: { type: "number", description: "Target paragraph index for before/after insertion" },
+          allowEnd: { type: "boolean", description: "Must be true to allow end-of-document insertion" },
           style: { type: "string", description: "Style to apply (e.g., 'Heading 1', 'Normal')" },
         },
         required: ["text"],
@@ -917,7 +918,13 @@ export const TOOL_ENDPOINTS: Record<string, ToolEndpoint> = {
 
   // Editing
   replaceParagraph: { method: "POST", path: "/api/paragraph/replace", mapArgs: (args) => ({ path: "/api/paragraph/replace", body: args }) },
-  insertText: { method: "POST", path: "/api/insert", mapArgs: (args) => ({ path: "/api/insert", body: args }) },
+  insertText: { method: "POST", path: "/api/insert", mapArgs: (args) => ({ path: "/api/insert", body: {
+    text: args.text,
+    location: args.location ?? args.position,
+    paragraphIndex: args.paragraphIndex ?? args.index,
+    style: args.style,
+    allowEnd: args.allowEnd,
+  } }) },
   deleteParagraph: { method: "POST", path: "/api/paragraph/delete", mapArgs: (args) => ({ path: "/api/paragraph/delete", body: args }) },
 
   // Find & Replace
