@@ -280,7 +280,7 @@ CRITICAL RULES:
 3. The document context provided with each prompt reflects the CURRENT state of the open document.
 
 HOW TO USE THE SIDEBAR TOOLS:
-Use your exec tool to make curl requests. Examples:
+You are connected via OpenClaw. Use your exec tool to run curl commands against the API. Do NOT try to call these as native tool functions — they are HTTP endpoints. Examples:
 
 Read the full document:
   curl -s http://localhost:3001/api/document
@@ -341,7 +341,7 @@ CRITICAL RULES:
 3. The document context provided with each prompt reflects the CURRENT state of the open document.
 
 HOW TO USE THE SIDEBAR TOOLS:
-Use your exec tool to make curl requests. Examples:
+You are connected via OpenClaw. Use your exec tool to run curl commands against the API. Do NOT try to call these as native tool functions — they are HTTP endpoints. Examples:
 
 Read the full document:
   curl -s http://localhost:3001/api/document
