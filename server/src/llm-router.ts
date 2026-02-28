@@ -136,6 +136,28 @@ export function parseSSELines(buffer: string): { events: string[]; remainder: st
   return { events, remainder };
 }
 
+function extractAssistantTextFromChatCompletion(parsed: any): string {
+  const message = parsed?.choices?.[0]?.message;
+  const content = message?.content;
+
+  if (typeof content === "string") return content;
+
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((p: any) => {
+        if (typeof p === "string") return p;
+        if (typeof p?.text === "string") return p.text;
+        if (typeof p?.content === "string") return p.content;
+        return "";
+      })
+      .filter(Boolean);
+    if (parts.length) return parts.join("\n");
+  }
+
+  if (typeof parsed?.choices?.[0]?.text === "string") return parsed.choices[0].text;
+  return "";
+}
+
 // ── Backend: OpenClaw ──
 
 /**
@@ -189,9 +211,11 @@ export async function* routeOpenClaw(
 
   try {
     const parsed = JSON.parse(raw);
-    const content = parsed?.choices?.[0]?.message?.content;
-    if (typeof content === "string" && content.length) {
-      yield content;
+    const text = extractAssistantTextFromChatCompletion(parsed);
+    if (text) {
+      yield text;
+    } else if (raw.trim()) {
+      yield raw.trim();
     }
   } catch {
     // fallback: return raw body to aid debugging if gateway returns non-JSON
@@ -377,7 +401,7 @@ export async function* routeLocal(
   if (context.messages) messages.push(...context.messages);
   messages.push({ role: "user", content: prompt });
 
-  const body: any = { model, messages, stream: true };
+  const body: any = { model, messages, stream: false };
   if (context.tools?.length) body.tools = context.tools;
 
   const base = baseUrl.replace(/\/$/, "");
@@ -388,28 +412,23 @@ export async function* routeLocal(
     headers: { "Content-Type": "application/json" },
   }, body);
 
+  let raw = "";
+  for await (const chunk of res) raw += chunk.toString();
+
   if (res.statusCode && res.statusCode >= 400) {
-    let errBody = "";
-    for await (const chunk of res) errBody += chunk.toString();
-    throw new Error(`Local LLM error ${res.statusCode}: ${errBody.slice(0, 500)}`);
+    throw new Error(`Local LLM error ${res.statusCode}: ${raw.slice(0, 500)}`);
   }
 
-  let buffer = "";
-  for await (const chunk of res) {
-    buffer += chunk.toString();
-    const { events, remainder } = parseSSELines(buffer);
-    buffer = remainder;
-    for (const event of events) {
-      try {
-        const parsed = JSON.parse(event);
-        const delta = parsed.choices?.[0]?.delta;
-        if (delta?.tool_calls) {
-          yield JSON.stringify({ type: "tool_calls", delta: delta.tool_calls });
-        } else if (delta?.content) {
-          yield delta.content;
-        }
-      } catch {}
+  try {
+    const parsed = JSON.parse(raw);
+    const text = extractAssistantTextFromChatCompletion(parsed);
+    if (text) {
+      yield text;
+    } else if (raw.trim()) {
+      yield raw.trim();
     }
+  } catch {
+    if (raw.trim()) yield raw.trim();
   }
 }
 
