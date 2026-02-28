@@ -1154,6 +1154,50 @@ app.post("/api/toa/check", async (_req, res) => {
   } catch (e: any) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
+
+// ── Model Discovery ──
+app.get("/api/models/openai", async (_req, res) => {
+  try {
+    const cfg = readConfig();
+    const key = cfg.openaiApiKey;
+    if (!key) return res.json({ ok: false, error: "No OpenAI API key configured" });
+    const resp = await fetch("https://api.openai.com/v1/models", {
+      headers: { "Authorization": `Bearer ${key}` }
+    });
+    const data = await resp.json();
+    // Filter to chat models only, sort by id
+    const chatModels = ((data as any).data || [])
+      .filter((m: any) => m.id && !m.id.includes("embedding") && !m.id.includes("whisper") && !m.id.includes("tts") && !m.id.includes("dall-e") && !m.id.includes("moderation"))
+      .sort((a: any, b: any) => a.id.localeCompare(b.id));
+    res.json({ ok: true, data: chatModels });
+  } catch (e: any) { res.json({ ok: false, error: e.message }); }
+});
+
+app.get("/api/models/anthropic", async (_req, res) => {
+  try {
+    const cfg = readConfig();
+    const key = cfg.anthropicApiKey;
+    if (!key) return res.json({ ok: false, error: "No Anthropic API key configured" });
+    const resp = await fetch("https://api.anthropic.com/v1/models", {
+      headers: { "x-api-key": key, "anthropic-version": "2023-06-01" }
+    });
+    const data = await resp.json();
+    const models = ((data as any).data || [])
+      .sort((a: any, b: any) => (a.id || "").localeCompare(b.id || ""));
+    res.json({ ok: true, data: models });
+  } catch (e: any) { res.json({ ok: false, error: e.message }); }
+});
+
+app.get("/api/models/local", async (req, res) => {
+  try {
+    const baseUrl = req.query.baseUrl as string;
+    if (!baseUrl) return res.json({ ok: false, error: "baseUrl required" });
+    const resp = await fetch(`${baseUrl}/v1/models`);
+    const data = await resp.json();
+    res.json({ ok: true, data: (data as any).data || [] });
+  } catch (e: any) { res.json({ ok: false, error: e.message }); }
+});
+
 // ── Page Setup ──
 app.get("/api/page/setup", apiHandler("getPageSetup", (req) => ({
   sectionIndex: req.query.sectionIndex ? parseInt(req.query.sectionIndex as string, 10) : 0,

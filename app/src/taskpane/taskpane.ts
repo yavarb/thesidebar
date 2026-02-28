@@ -2279,34 +2279,60 @@ async function populateModelDropdown(select: HTMLSelectElement, currentDefault?:
     models.push({ id: "openclaw", label: "OpenClaw (default)", backend: "openclaw" });
   }
 
-  // OpenAI — only if key is configured
+  // OpenAI — fetch available models dynamically
   if (settings.openaiApiKey) {
-    models.push(
-      { id: "openai:gpt-4o", label: "GPT-4o (OpenAI)", backend: "openai" },
-      { id: "openai:gpt-4o-mini", label: "GPT-4o Mini (OpenAI)", backend: "openai" },
-      { id: "openai:o1", label: "o1 (OpenAI)", backend: "openai" },
-      { id: "openai:o3-mini", label: "o3-mini (OpenAI)", backend: "openai" },
-    );
+    try {
+      const r = await fetch("http://localhost:3001/api/models/openai");
+      const j = await r.json();
+      if (j?.ok && j.data?.length) {
+        for (const m of j.data) {
+          models.push({ id: `openai:${m.id}`, label: `${m.id} (OpenAI)`, backend: "openai" });
+        }
+      }
+    } catch {
+      // Fallback to common models
+      models.push(
+        { id: "openai:gpt-4o", label: "GPT-4o (OpenAI)", backend: "openai" },
+        { id: "openai:gpt-4o-mini", label: "GPT-4o Mini (OpenAI)", backend: "openai" },
+      );
+    }
   }
 
-  // Anthropic — only if key is configured
+  // Anthropic — fetch available models dynamically
   if (settings.anthropicApiKey) {
-    models.push(
-      { id: "anthropic:claude-sonnet-4-20250514", label: "Claude Sonnet 4 (Anthropic)", backend: "anthropic" },
-      { id: "anthropic:claude-opus-4-20250514", label: "Claude Opus 4 (Anthropic)", backend: "anthropic" },
-      { id: "anthropic:claude-3-haiku-20240307", label: "Claude 3 Haiku (Anthropic)", backend: "anthropic" },
-    );
+    try {
+      const r = await fetch("http://localhost:3001/api/models/anthropic");
+      const j = await r.json();
+      if (j?.ok && j.data?.length) {
+        for (const m of j.data) {
+          models.push({ id: `anthropic:${m.id}`, label: `${m.name || m.id} (Anthropic)`, backend: "anthropic" });
+        }
+      }
+    } catch {
+      // Fallback
+      models.push(
+        { id: "anthropic:claude-sonnet-4-20250514", label: "Claude Sonnet 4 (Anthropic)", backend: "anthropic" },
+      );
+    }
   }
 
-  // Local endpoints
+  // Local endpoints — fetch models dynamically
   const endpoints = settings.localEndpoints || [];
   for (const ep of endpoints) {
     if (ep.name && ep.baseUrl) {
-      models.push({
-        id: `local:${ep.baseUrl}:default`,
-        label: `${ep.name} (Local)`,
-        backend: "local",
-      });
+      try {
+        const r = await fetch(`http://localhost:3001/api/models/local?baseUrl=${encodeURIComponent(ep.baseUrl)}`);
+        const j = await r.json();
+        if (j?.ok && j.data?.length) {
+          for (const m of j.data) {
+            models.push({ id: `local:${ep.baseUrl}:${m.id}`, label: `${m.id} (${ep.name})`, backend: "local" });
+          }
+        } else {
+          models.push({ id: `local:${ep.baseUrl}:default`, label: `${ep.name} (Local)`, backend: "local" });
+        }
+      } catch {
+        models.push({ id: `local:${ep.baseUrl}:default`, label: `${ep.name} (Local)`, backend: "local" });
+      }
     }
   }
 
