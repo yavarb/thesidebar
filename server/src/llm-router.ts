@@ -165,43 +165,37 @@ export async function* routeOpenClaw(
   if (context.messages) messages.push(...context.messages);
   messages.push({ role: "user", content: prompt });
 
-  const body: any = { model: `openclaw:main`, messages, stream: true };
+  // NOTE: OpenClaw's chat-completions endpoint may not stream token deltas
+  // consistently; use non-stream mode for reliability.
+  const body: any = { model, messages, stream: false };
   if (context.sessionUser) body.user = context.sessionUser;
   if (context.tools?.length) body.tools = context.tools;
 
   const headers: Record<string, string> = { "Content-Type": "application/json", "x-openclaw-agent-id": "main" };
 
-  // Add auth token if configured
   if (config.openclawToken) {
     headers["Authorization"] = `Bearer ${config.openclawToken}`;
   }
 
   const url = baseUrl.replace(/\/$/, "") + "/v1/chat/completions";
-
   const res = await httpRequest(url, { method: "POST", headers }, body);
 
+  let raw = "";
+  for await (const chunk of res) raw += chunk.toString();
+
   if (res.statusCode && res.statusCode >= 400) {
-    let errBody = "";
-    for await (const chunk of res) errBody += chunk.toString();
-    throw new Error(`OpenClaw API error ${res.statusCode}: ${errBody.slice(0, 500)}`);
+    throw new Error(`OpenClaw API error ${res.statusCode}: ${raw.slice(0, 500)}`);
   }
 
-  let buffer = "";
-  for await (const chunk of res) {
-    buffer += chunk.toString();
-    const { events, remainder } = parseSSELines(buffer);
-    buffer = remainder;
-    for (const event of events) {
-      try {
-        const parsed = JSON.parse(event);
-        const delta = parsed.choices?.[0]?.delta;
-        if (delta?.tool_calls) {
-          yield JSON.stringify({ type: "tool_calls", delta: delta.tool_calls });
-        } else if (delta?.content) {
-          yield delta.content;
-        }
-      } catch {}
+  try {
+    const parsed = JSON.parse(raw);
+    const content = parsed?.choices?.[0]?.message?.content;
+    if (typeof content === "string" && content.length) {
+      yield content;
     }
+  } catch {
+    // fallback: return raw body to aid debugging if gateway returns non-JSON
+    if (raw.trim()) yield raw.trim();
   }
 }
 
@@ -386,7 +380,8 @@ export async function* routeLocal(
   const body: any = { model, messages, stream: true };
   if (context.tools?.length) body.tools = context.tools;
 
-  const url = baseUrl.replace(/\/$/, "") + "/chat/completions";
+  const base = baseUrl.replace(/\/$/, "");
+  const url = base.endsWith("/v1") ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
 
   const res = await httpRequest(url, {
     method: "POST",
