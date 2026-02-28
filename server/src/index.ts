@@ -393,7 +393,7 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       config: routerConfig,
       documentContext,
       systemPrompt: systemPromptOverride,
-      sessionUser: isOpenClaw ? sessionId : undefined,
+      sessionUser: isOpenClaw ? "thesidebar:" + sessionId : undefined,
       conversationHistory: !isOpenClaw ? managedHistory : undefined,
       onToolCall: (call) => {
         if (MODIFYING_TOOLS.has(call.name)) {
