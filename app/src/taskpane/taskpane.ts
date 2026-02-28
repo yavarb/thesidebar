@@ -971,9 +971,43 @@ async function handleCommand(command: string, params: any): Promise<any> {
         if (paraIndex < 0 || paraIndex >= paragraphs.items.length) throw new Error(`index ${paraIndex} out of range`);
         const p = paragraphs.items[paraIndex]; p.load("text,style"); await ctx.sync();
         const original = p.text;
-        const range = p.getRange(Word.RangeLocation.content);
-        range.insertText(text, Word.InsertLocation.replace);
-        await ctx.sync();
+        
+        // Format-preserving edit: if text changed, try to do minimal find/replace
+        // to preserve inline formatting (bold, italic, etc.)
+        if (original === text) {
+          return { index: paraIndex, changed: false };
+        }
+        
+        // Strategy: find the longest common prefix and suffix, replace only the middle
+        let prefixLen = 0;
+        while (prefixLen < original.length && prefixLen < text.length && original[prefixLen] === text[prefixLen]) prefixLen++;
+        let suffixLen = 0;
+        while (suffixLen < (original.length - prefixLen) && suffixLen < (text.length - prefixLen) && 
+               original[original.length - 1 - suffixLen] === text[text.length - 1 - suffixLen]) suffixLen++;
+        
+        const oldMiddle = original.substring(prefixLen, original.length - suffixLen);
+        const newMiddle = text.substring(prefixLen, text.length - suffixLen);
+        
+        if (oldMiddle.length > 0 && oldMiddle.length < original.length) {
+          // Partial replacement — preserves formatting on unchanged parts
+          const searchResults = p.search(oldMiddle, { matchCase: true });
+          searchResults.load("items");
+          await ctx.sync();
+          if (searchResults.items.length > 0) {
+            searchResults.items[0].insertText(newMiddle, Word.InsertLocation.replace);
+            await ctx.sync();
+          } else {
+            // Fallback: full replacement if search fails
+            const range = p.getRange(Word.RangeLocation.content);
+            range.insertText(text, Word.InsertLocation.replace);
+            await ctx.sync();
+          }
+        } else {
+          // Complete rewrite — no choice but full replacement
+          const range = p.getRange(Word.RangeLocation.content);
+          range.insertText(text, Word.InsertLocation.replace);
+          await ctx.sync();
+        }
         pushUndo({ command: "replaceParagraph", original, replacement: text, paragraphIndex: paraIndex, style: p.style, timestamp: Date.now() });
         return { original, replacement: text, paragraphIndex: paraIndex, undoAvailable: true };
       });
