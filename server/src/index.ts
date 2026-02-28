@@ -195,7 +195,7 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       } else {
         // Direct API models have native tool access — send compact summary, let them read on demand
         const stats = await sendCommand("getDocumentStats", {});
-        const structure = await sendCommand("getStructure", {});
+        const structure = await sendCommand("getDocumentStructure", {});
         documentContext = `Document: ${stats?.wordCount || "?"} words, ${stats?.paragraphCount || "?"} paragraphs, ${stats?.footnoteCount || "?"} footnotes, ${stats?.sectionCount || "?"} sections.\n`;
         if (structure?.headings?.length) {
           documentContext += "Structure:\n" + structure.headings.map((h: any) => `${"  ".repeat((h.level || 1) - 1)}${h.text}`).join("\n");
