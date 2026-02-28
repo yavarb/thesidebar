@@ -2811,7 +2811,9 @@ Brief list
 **4) Could Not Verify**
 Entries where the citation wasn't found in the body text
 
-Keep it compact. Be precise about page numbers.`;
+Keep it compact. Be precise about page numbers.
+
+After listing all findings, IMMEDIATELY fix any incorrect page numbers in the TOA by editing the document directly. Use the replaceParagraph or findReplace tools to update the wrong page numbers in the Table of Authorities section. Do NOT tell the user to regenerate fields, update fields manually, or press F9. Make the corrections yourself.`;
 
       // Send to LLM via the normal prompt mechanism
       const input = document.getElementById("prompt-input") as HTMLTextAreaElement;
