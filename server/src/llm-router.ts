@@ -353,6 +353,10 @@ export async function* routeAnthropic(
           }
         } else if (parsed.type === "content_block_start" && parsed.content_block?.type === "tool_use") {
           yield JSON.stringify({ type: "tool_use_start", id: parsed.content_block.id, name: parsed.content_block.name });
+        } else if (parsed.type === "content_block_stop") {
+          // content_block_stop fires after each content block completes
+          // If we have a pending tool, this signals its completion
+          yield JSON.stringify({ type: "content_block_stop" });
         } else if (parsed.type === "message_delta" && parsed.delta?.stop_reason === "tool_use") {
           yield JSON.stringify({ type: "tool_use_complete" });
         }

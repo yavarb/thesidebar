@@ -409,15 +409,17 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
         } else if (parsed.type === "tool_use_start") {
           isToolEvent = true;
           anthropicCurrentTool = { id: parsed.id, name: parsed.name, argsJson: "" };
+          console.log("[agent] Anthropic tool_use_start:", parsed.name);
         } else if (parsed.type === "tool_input_delta") {
           isToolEvent = true;
           if (anthropicCurrentTool) anthropicCurrentTool.argsJson += parsed.delta;
-        } else if (parsed.type === "tool_use_complete") {
+        } else if (parsed.type === "tool_use_complete" || parsed.type === "content_block_stop") {
           isToolEvent = true;
           if (anthropicCurrentTool) {
             let args: Record<string, any> = {};
             try { args = JSON.parse(anthropicCurrentTool.argsJson); } catch {}
             toolCalls.push({ id: anthropicCurrentTool.id, name: anthropicCurrentTool.name, arguments: args });
+            console.log("[agent] Anthropic tool complete:", anthropicCurrentTool.name, JSON.stringify(args));
             anthropicCurrentTool = null;
           }
         } else if (parsed.type === "openclaw_queued") {
@@ -439,6 +441,8 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
       try { args = JSON.parse(accum.args); } catch {}
       toolCalls.push({ id: accum.id, name: accum.name, arguments: args });
     }
+
+    console.log("[agent] Iteration", iteration, "- toolCalls:", toolCalls.length, toolCalls.map(t => t.name).join(", "));
 
     // No tool calls — final response already streamed
     if (toolCalls.length === 0) {
