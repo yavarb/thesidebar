@@ -278,7 +278,12 @@ export async function* routeAnthropic(
   if (!config.anthropicApiKey) throw new Error("Anthropic API key not configured");
 
   const messages: Array<{ role: string; content: string }> = [];
-  if (context.messages) messages.push(...context.messages);
+  if (context.messages) {
+    // Anthropic rejects role:"system" in messages — filter them out
+    for (const m of context.messages) {
+      if (m.role !== "system") messages.push(m);
+    }
+  }
   messages.push({ role: "user", content: prompt });
 
   // Structure system as array of content blocks for optimal caching
