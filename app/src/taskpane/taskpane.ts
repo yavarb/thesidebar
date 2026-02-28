@@ -2626,6 +2626,7 @@ Rules:
     const input = document.getElementById("prompt-input") as HTMLTextAreaElement;
     if (input) {
       input.value = prompt;
+      (input as any)._displayLabel = "✂️ Tighten selection";
       const sendBtn = document.getElementById("prompt-send") as HTMLButtonElement;
       sendBtn?.click();
     }
