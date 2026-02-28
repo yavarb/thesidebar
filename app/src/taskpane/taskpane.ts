@@ -999,13 +999,13 @@ async function handleCommand(command: string, params: any): Promise<any> {
           } else {
             // Fallback: full replacement if search fails
             const range = p.getRange(Word.RangeLocation.content);
-            range.insertText(text, Word.InsertLocation.replace);
+            range.insertText(normalizeSmartQuotes(text), Word.InsertLocation.replace);
             await ctx.sync();
           }
         } else {
           // Complete rewrite — no choice but full replacement
           const range = p.getRange(Word.RangeLocation.content);
-          range.insertText(text, Word.InsertLocation.replace);
+          range.insertText(normalizeSmartQuotes(text), Word.InsertLocation.replace);
           await ctx.sync();
         }
         pushUndo({ command: "replaceParagraph", original, replacement: text, paragraphIndex: paraIndex, style: p.style, timestamp: Date.now() });
@@ -1107,11 +1107,11 @@ async function handleCommand(command: string, params: any): Promise<any> {
         if (paragraphIndex !== undefined) {
           const paragraphs = ctx.document.body.paragraphs; paragraphs.load("items"); await ctx.sync();
           if (paragraphIndex < 0 || paragraphIndex >= paragraphs.items.length) throw new Error(`paragraphIndex out of range`);
-          paragraph = paragraphs.items[paragraphIndex].insertParagraph(text, location === "before" ? Word.InsertLocation.before : Word.InsertLocation.after);
+          paragraph = paragraphs.items[paragraphIndex].insertParagraph(normalizeSmartQuotes(text), location === "before" ? Word.InsertLocation.before : Word.InsertLocation.after);
         } else if (location === "start") {
-          paragraph = ctx.document.body.insertParagraph(text, Word.InsertLocation.start);
+          paragraph = ctx.document.body.insertParagraph(normalizeSmartQuotes(text), Word.InsertLocation.start);
         } else if (location === "end" && allowEnd === true) {
-          paragraph = ctx.document.body.insertParagraph(text, Word.InsertLocation.end);
+          paragraph = ctx.document.body.insertParagraph(normalizeSmartQuotes(text), Word.InsertLocation.end);
         } else {
           throw new Error('Unsafe insert blocked: provide paragraphIndex (+ before/after) for targeted insertion. End-of-document insert requires { location: "end", allowEnd: true }.');
         }
@@ -1146,7 +1146,7 @@ async function handleCommand(command: string, params: any): Promise<any> {
         const paragraphs = ctx.document.body.paragraphs; paragraphs.load("items"); await ctx.sync();
         if (index < 0 || index >= paragraphs.items.length) throw new Error(`index out of range`);
         const p = paragraphs.items[index];
-        if (text !== undefined) p.insertText(text, Word.InsertLocation.replace);
+        if (text !== undefined) p.insertText(normalizeSmartQuotes(text), Word.InsertLocation.replace);
         if (style) p.style = style;
         p.load("text,style"); await ctx.sync();
         return { text: p.text, style: p.style };
@@ -1179,7 +1179,7 @@ async function handleCommand(command: string, params: any): Promise<any> {
         if (index === undefined || !text) throw new Error("index and text required");
         const footnotes = ctx.document.body.footnotes; footnotes.load("items"); await ctx.sync();
         if (index < 0 || index >= footnotes.items.length) throw new Error(`index out of range`);
-        footnotes.items[index].body.insertText(text, Word.InsertLocation.replace);
+        footnotes.items[index].body.insertText(normalizeSmartQuotes(text), Word.InsertLocation.replace);
         footnotes.items[index].body.load("text"); await ctx.sync();
         return { body: footnotes.items[index].body.text };
       });
@@ -1449,7 +1449,7 @@ async function handleCommand(command: string, params: any): Promise<any> {
         const table = tables.items[params?.tableIndex || 0];
         const cell = table.getCell(params.row, params.column);
         cell.body.clear();
-        cell.body.insertText(params.text, Word.InsertLocation.start);
+        cell.body.insertText(normalizeSmartQuotes(params.text), Word.InsertLocation.start);
         await ctx.sync();
         return { success: true };
       });
@@ -1507,7 +1507,7 @@ async function handleCommand(command: string, params: any): Promise<any> {
           ? section.getFooter(headerType)
           : section.getHeader(headerType);
         hf.clear();
-        hf.insertText(params.text, Word.InsertLocation.start);
+        hf.insertText(normalizeSmartQuotes(params.text), Word.InsertLocation.start);
         await ctx.sync();
         return { success: true };
       });
@@ -2292,6 +2292,23 @@ function addReferenceFolderRow(folderPath: string = ""): void {
 }
 
 /** Escape HTML special characters */
+function normalizeSmartQuotes(input: string): string {
+  let out = input;
+  // First convert clearly paired straight double quotes
+  out = out.replace(/"([^"]+)"/g, "“$1”");
+  // Convert apostrophes in words (can't -> can’t)
+  out = out.replace(/(\w)'(\w)/g, "$1’$2");
+  // Opening single quotes after whitespace/punctuation
+  out = out.replace(/(^|[\s([{<])'/g, "$1‘");
+  // Remaining single quotes become closing
+  out = out.replace(/'/g, "’");
+  // Opening double quotes after whitespace/punctuation
+  out = out.replace(/(^|[\s([{<])"/g, "$1“");
+  // Remaining straight double quotes become closing
+  out = out.replace(/"/g, "”");
+  return out;
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
