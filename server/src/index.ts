@@ -182,16 +182,30 @@ async function processPrompt(entry: PromptEntry, ws: any) {
   const abortController = new AbortController();
   currentAbortController = abortController;
   try {
+    // Determine model early (needed for context strategy)
+    const config = readConfig();
+    const model = entry.model || config.defaultModel || "openclaw";
+
     // Get document context (from cache if fresh)
     let documentContext = "";
     try {
-      documentContext = await getDocumentContext();
+      if (!model.startsWith("openai:") && !model.startsWith("anthropic:") && !model.startsWith("local:")) {
+        // OpenClaw needs full doc since it uses curl (can't call tools natively)
+        documentContext = await getDocumentContext();
+      } else {
+        // Direct API models have native tool access — send compact summary, let them read on demand
+        const stats = await sendCommand("getDocumentStats", {});
+        const structure = await sendCommand("getStructure", {});
+        documentContext = `Document: ${stats?.wordCount || "?"} words, ${stats?.paragraphCount || "?"} paragraphs, ${stats?.footnoteCount || "?"} footnotes, ${stats?.sectionCount || "?"} sections.\n`;
+        if (structure?.headings?.length) {
+          documentContext += "Structure:\n" + structure.headings.map((h: any) => `${"  ".repeat((h.level || 1) - 1)}${h.text}`).join("\n");
+        }
+        documentContext += "\n\nUse readDocument, readParagraph, or readParagraphs tools to read specific content as needed. Do NOT ask the user what to read — just read it.";
+      }
     } catch (e: any) {
       console.error("[agent] Failed to get document:", e.message);
     }
 
-    // Read config for API keys
-    const config = readConfig();
     const routerConfig = {
       openclawUrl: config.openclawUrl,
       openclawToken: config.openclawToken,
@@ -199,8 +213,6 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       anthropicApiKey: config.anthropicApiKey,
       localEndpoints: config.localEndpoints,
     };
-
-    const model = entry.model || config.defaultModel || "openclaw";
 
     // ── Reference Documents (RAG) ──
     const isOpenClawModel = !model.startsWith("openai:") && !model.startsWith("anthropic:") && !model.startsWith("local:");
