@@ -197,13 +197,11 @@ export async function* routeOpenClaw(
   if (context.messages) messages.push(...context.messages);
   messages.push({ role: "user", content: prompt });
 
-  // NOTE: OpenClaw's chat-completions endpoint may not stream token deltas
-  // consistently; use non-stream mode for reliability.
-  const body: any = { model, messages, stream: false };
+  const body: any = { model, messages, stream: true };
   if (context.sessionUser) body.user = context.sessionUser;
   if (context.tools?.length) body.tools = context.tools;
 
-  const headers: Record<string, string> = { "Content-Type": "application/json", "x-openclaw-agent-id": "main" };
+  const headers: Record<string, string> = { "Content-Type": "application/json", "x-openclaw-agent-id": "thesidebar" };
 
   if (config.openclawToken) {
     headers["Authorization"] = `Bearer ${config.openclawToken}`;
@@ -212,24 +210,27 @@ export async function* routeOpenClaw(
   const url = baseUrl.replace(/\/$/, "") + "/v1/chat/completions";
   const res = await httpRequest(url, { method: "POST", headers }, body);
 
-  let raw = "";
-  for await (const chunk of res) raw += chunk.toString();
-
   if (res.statusCode && res.statusCode >= 400) {
-    throw new Error(`OpenClaw API error ${res.statusCode}: ${raw.slice(0, 500)}`);
+    let errBody = "";
+    for await (const chunk of res) errBody += chunk.toString();
+    throw new Error(`OpenClaw API error ${res.statusCode}: ${errBody.slice(0, 500)}`);
   }
 
-  try {
-    const parsed = JSON.parse(raw);
-    const text = extractAssistantTextFromChatCompletion(parsed);
-    if (text) {
-      yield text;
-    } else if (raw.trim()) {
-      yield raw.trim();
+  // Stream SSE — same delta format as OpenAI chat completions
+  let buffer = "";
+  for await (const chunk of res) {
+    buffer += chunk.toString();
+    const { events, remainder } = parseSSELines(buffer);
+    buffer = remainder;
+    for (const event of events) {
+      try {
+        const parsed = JSON.parse(event);
+        const delta = parsed.choices?.[0]?.delta;
+        if (delta?.content) {
+          yield delta.content;
+        }
+      } catch {}
     }
-  } catch {
-    // fallback: return raw body to aid debugging if gateway returns non-JSON
-    if (raw.trim()) yield raw.trim();
   }
 }
 

@@ -190,8 +190,8 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     // Get document context (from cache if fresh)
     let documentContext = "";
     try {
-      if (!model.startsWith("openai:") && !model.startsWith("anthropic:") && !model.startsWith("local:")) {
-        // OpenClaw needs full doc since it uses curl (can't call tools natively)
+      if (false) {
+        // Previously sent full doc for OpenClaw — now all models get compact summary
         documentContext = await getDocumentContext();
       } else {
         // Direct API models have native tool access — send compact summary, let them read on demand
@@ -201,7 +201,11 @@ async function processPrompt(entry: PromptEntry, ws: any) {
         if (structure?.headings?.length) {
           documentContext += "Structure:\n" + structure.headings.map((h: any) => `${"  ".repeat((h.level || 1) - 1)}${h.text}`).join("\n");
         }
-        documentContext += "\n\nUse readDocument, readParagraph, or readParagraphs tools to read specific content as needed. Do NOT ask the user what to read — just read it.";
+        if (!model.startsWith("openai:") && !model.startsWith("anthropic:") && !model.startsWith("local:")) {
+          documentContext += "\n\nYou are operating through The Sidebar Word add-in. To read or edit document content, use curl to call the Sidebar API at http://localhost:3001 (see Integration Protocol in MEMORY.md). Read the relevant sections before making edits to avoid duplicating existing content.";
+        } else {
+          documentContext += "\n\nUse readDocument, readParagraph, or readParagraphs tools to read specific content as needed. Do NOT ask the user what to read \u2014 just read it.";
+        }
       }
     } catch (e: any) {
       console.error("[agent] Failed to get document:", e.message);
@@ -430,14 +434,69 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       }
     }
 
+    // Log what we're sending
+    console.log(`[agent] Processing prompt for model="${model}" isOpenClaw=${isOpenClaw} systemPromptLen=${(systemPromptOverride||"").length} docContextLen=${documentContext.length}`);
+
+    // OpenClaw fast path — async: fire off request, return immediately, deliver result when done
+    if (isOpenClaw) {
+      const ocContext: any = {
+        systemPrompt: systemPromptOverride || undefined,
+        documentContext,
+        messages: [],
+        sessionUser: "thesidebar:" + sessionId,
+      };
+      console.log(`[agent] OpenClaw async: dispatching to OpenClaw`);
+
+      // Show "Working on it" as streaming progress (not a final response)
+      conversationHistory.push({ role: "user", content: fullPrompt, timestamp: Date.now() });
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "⌛ Working on it…" }));
+      }
+
+      // Fire off the real work in the background
+      const bgPromptId = entry.id;
+      const bgExchangeId = currentExchangeId;
+      const bgWs = ws;
+      const bgHistory = conversationHistory;
+      (async () => {
+        let bgResponse = "";
+        try {
+          for await (const chunk of routePrompt(fullPrompt, model, ocContext, routerConfig)) {
+            try {
+              const parsed = JSON.parse(chunk);
+              if (parsed.type === "reasoning") continue;
+              if (parsed.type === "tool_calls") continue;
+            } catch {}
+            bgResponse += chunk;
+            // Stream progress — replaces the "Working on it" text progressively
+            if (bgWs.readyState === 1) {
+              bgWs.send(JSON.stringify({ type: "prompt_progress", promptId: bgPromptId, text: bgResponse }));
+            }
+          }
+        } catch (e: any) {
+          bgResponse = `Error: ${e.message}`;
+          console.error(`[agent] OpenClaw background error:`, e.message);
+        }
+        // Update conversation history
+        bgHistory.push({ role: "assistant", content: bgResponse || "(No response)", timestamp: Date.now() });
+        // Send single final prompt_response — UI removes streaming bubble, creates final one
+        if (bgWs.readyState === 1) {
+          bgWs.send(JSON.stringify({ type: "prompt_response", promptId: bgPromptId, text: bgResponse || "(No response)", timestamp: Date.now(), hasChanges: false, exchangeId: bgExchangeId }));
+        }
+        console.log(`[agent] OpenClaw background task complete (${bgResponse.length} chars), first 100: ${bgResponse.substring(0, 100)}`);
+      })();
+      // Don't await — continue processing queue immediately
+
+    } else {
+
     for await (const chunk of runAgentLoop({
       prompt: fullPrompt,
       model,
       config: routerConfig,
       documentContext,
       systemPrompt: systemPromptOverride,
-      sessionUser: isOpenClaw ? "thesidebar:" + sessionId : undefined,
-      conversationHistory: !isOpenClaw ? managedHistory : undefined,
+      sessionUser: "thesidebar:" + sessionId,
+      conversationHistory: managedHistory,
       onToolCall: (call) => {
         if (MODIFYING_TOOLS.has(call.name)) {
           modifyingCallCount++;
@@ -488,6 +547,8 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
     // Track conversation history for non-OpenClaw models
     conversationHistory.push({ role: "user", content: fullPrompt, timestamp: Date.now() });
     conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)", timestamp: Date.now() });
+
+    } // end else (non-OpenClaw agent loop)
 
     // Memory extraction — learn from this exchange (async, non-blocking)
     if (!isOpenClaw && fullResponse) {
@@ -550,8 +611,8 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
     // Clear abort controller
     if (currentAbortController === abortController) currentAbortController = null;
 
-    // Send final response
-    if (ws.readyState === 1) {
+    // Send final response (skip for OpenClaw — handled by background task)
+    if (!isOpenClaw && ws.readyState === 1) {
       ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: fullResponse || "(No response)", timestamp: Date.now(), hasChanges, exchangeId: currentExchangeId, changeSummaries: changeSummaries.length > 0 ? changeSummaries : undefined }));
     }
   } catch (e: any) {
@@ -1091,6 +1152,26 @@ app.post("/api/openclaw/test", async (req, res) => {
     res.json({ ok: false, error: e.message });
   }
 });
+// ── Document Reload (via AppleScript, Mac only) ──
+// After python-docx edits the .docx on disk, call this to make Word reopen it.
+app.post("/api/document/reload", async (req, res) => {
+  const { execSync } = require("child_process");
+  try {
+    const docPath = execSync(
+      `osascript -e 'tell application "Microsoft Word" to return POSIX path of (full name of active document as text)'`,
+      { encoding: "utf-8", timeout: 5000 }
+    ).trim();
+    if (!docPath || docPath === "missing value") {
+      return res.status(400).json({ ok: false, error: "No active document in Word" });
+    }
+    execSync(`osascript -e 'tell application "Microsoft Word" to close active document saving no' -e 'delay 0.3' -e 'tell application "Microsoft Word" to open "${docPath}"' -e 'tell application "Microsoft Word" to activate'`, { encoding: "utf-8", timeout: 15000 });
+    await new Promise(r => setTimeout(r, 2000));
+    res.json({ ok: true, data: { reloaded: docPath } });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ── PDF Export (via AppleScript, Mac only) ──
 app.post("/api/export/pdf", async (req, res) => {
   const outPath = req.body?.path || "/tmp/thesidebar-export.pdf";
