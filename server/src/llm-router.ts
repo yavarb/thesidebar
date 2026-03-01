@@ -38,7 +38,7 @@ export interface LocalEndpoint {
 }
 
 /** Which backend to route to */
-export type Backend = "openclaw" | "openai" | "anthropic" | "local";
+export type Backend = "openclaw" | "openai" | "anthropic" | "local" | "responses";
 
 /** Model specification for routing */
 export interface ModelSpec {
@@ -136,13 +136,22 @@ export function parseSSELines(buffer: string): { events: string[]; remainder: st
   return { events, remainder };
 }
 
+interface LLMExtract { text: string; reasoning?: string; }
+
 function extractAssistantTextFromChatCompletion(parsed: any): string {
+  return extractLLMResponse(parsed).text;
+}
+
+function extractLLMResponse(parsed: any): LLMExtract {
   const message = parsed?.choices?.[0]?.message;
   const content = message?.content;
+  // reasoning_content is used by DeepSeek, QwQ, and other reasoning models
+  const reasoning = message?.reasoning_content || message?.reasoning || undefined;
 
-  if (typeof content === "string") return content;
-
-  if (Array.isArray(content)) {
+  let text = "";
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
     const parts = content
       .map((p: any) => {
         if (typeof p === "string") return p;
@@ -151,11 +160,12 @@ function extractAssistantTextFromChatCompletion(parsed: any): string {
         return "";
       })
       .filter(Boolean);
-    if (parts.length) return parts.join("\n");
+    if (parts.length) text = parts.join("\n");
+  } else if (typeof parsed?.choices?.[0]?.text === "string") {
+    text = parsed.choices[0].text;
   }
 
-  if (typeof parsed?.choices?.[0]?.text === "string") return parsed.choices[0].text;
-  return "";
+  return { text, reasoning: typeof reasoning === "string" ? reasoning : undefined };
 }
 
 // ── Backend: OpenClaw ──
@@ -395,11 +405,19 @@ export async function* routeLocal(
   _config: RouterConfig,
   baseUrl: string
 ): AsyncGenerator<string> {
+  // Many local models don't support the "system" role in their chat templates.
+  // Fold system content into the first user message to avoid jinja errors.
+  const systemParts: string[] = [];
+  if (context.systemPrompt) systemParts.push(context.systemPrompt);
+  if (context.documentContext) systemParts.push(`Current document context:\n${context.documentContext}`);
+
   const messages: Array<{ role: string; content: string }> = [];
-  if (context.systemPrompt) messages.push({ role: "system", content: context.systemPrompt });
-  if (context.documentContext) messages.push({ role: "system", content: `Current document context:\n${context.documentContext}` });
-  if (context.messages) messages.push(...context.messages);
-  messages.push({ role: "user", content: prompt });
+  if (context.messages) messages.push(...context.messages.filter(m => m.role !== "system"));
+
+  const userContent = systemParts.length
+    ? `${systemParts.join("\n\n")}\n\n${prompt}`
+    : prompt;
+  messages.push({ role: "user", content: userContent });
 
   const body: any = { model, messages, stream: false };
   if (context.tools?.length) body.tools = context.tools;
@@ -421,11 +439,147 @@ export async function* routeLocal(
 
   try {
     const parsed = JSON.parse(raw);
-    const text = extractAssistantTextFromChatCompletion(parsed);
-    if (text) {
-      yield text;
-    } else if (raw.trim()) {
+    const { text, reasoning } = extractLLMResponse(parsed);
+    if (reasoning) {
+      yield JSON.stringify({ type: "reasoning", content: reasoning });
+    }
+
+    // Parse tool calls from the response (OpenAI format)
+    const message = parsed?.choices?.[0]?.message;
+    if (message?.tool_calls && Array.isArray(message.tool_calls)) {
+      // Yield tool calls in the same format as routeOpenAI streaming
+      const delta = message.tool_calls.map((tc: any, i: number) => ({
+        index: i,
+        id: tc.id,
+        function: {
+          name: tc.function?.name,
+          arguments: tc.function?.arguments || "{}",
+        },
+      }));
+      yield JSON.stringify({ type: "tool_calls", delta });
+    }
+
+    // If content is empty but reasoning exists, use reasoning as the response
+    const displayText = text || reasoning || "";
+    if (displayText) {
+      if (reasoning && !text) {
+        // Model put everything in reasoning field — yield as reasoning event then as text
+        yield JSON.stringify({ type: "reasoning", content: reasoning });
+      }
+      yield displayText;
+    } else if (!message?.tool_calls?.length && raw.trim()) {
       yield raw.trim();
+    }
+  } catch {
+    if (raw.trim()) yield raw.trim();
+  }
+}
+
+// ── Backend: OpenAI Responses API (Codex models) ──
+
+const CODEX_MODEL_PATTERNS = ["codex", "gpt-5.2", "gpt-5.3"];
+
+export function isResponsesModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  return CODEX_MODEL_PATTERNS.some(p => lower.includes(p));
+}
+
+export async function* routeResponses(
+  prompt: string,
+  model: string,
+  context: PromptContext,
+  config: RouterConfig
+): AsyncGenerator<string> {
+  const key = config.openaiApiKey;
+  if (!key) throw new Error("No OpenAI API key configured");
+
+  // Build input: system instructions + conversation history + current prompt
+  const input: any[] = [];
+  if (context.messages) {
+    for (const m of context.messages) {
+      if (m.role === "system") continue; // handled via instructions
+      input.push({ role: m.role, content: m.content });
+    }
+  }
+  input.push({ role: "user", content: prompt });
+
+  // Convert tool definitions from chat format to Responses API format
+  const tools = context.tools?.map((t: any) => ({
+    type: "function" as const,
+    name: t.function.name,
+    description: t.function.description,
+    parameters: t.function.parameters,
+  }));
+
+  // Build system instructions
+  const instructions = [
+    context.systemPrompt || "",
+    context.documentContext ? `Current document context:\n${context.documentContext}` : "",
+  ].filter(Boolean).join("\n\n");
+
+  const body: any = {
+    model,
+    input,
+    stream: false,
+  };
+  if (instructions) body.instructions = instructions;
+  if (tools?.length) body.tools = tools;
+
+  const res = await httpRequest("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${key}`,
+    },
+  }, body);
+
+  let raw = "";
+  for await (const chunk of res) raw += chunk.toString();
+
+  if (res.statusCode && res.statusCode >= 400) {
+    throw new Error(`OpenAI Responses API error ${res.statusCode}: ${raw.slice(0, 500)}`);
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    const output = parsed.output || [];
+
+    // Extract reasoning if present
+    const reasoning = parsed.reasoning?.summary;
+    if (reasoning) {
+      yield JSON.stringify({ type: "reasoning", content: reasoning });
+    }
+
+    // Process output items
+    const toolCalls: any[] = [];
+    let textContent = "";
+
+    for (const item of output) {
+      if (item.type === "message") {
+        for (const block of (item.content || [])) {
+          if (block.type === "output_text") {
+            textContent += block.text;
+          }
+        }
+      } else if (item.type === "function_call") {
+        toolCalls.push({
+          index: toolCalls.length,
+          id: item.call_id || item.id,
+          function: {
+            name: item.name,
+            arguments: item.arguments || "{}",
+          },
+        });
+      }
+    }
+
+    // Yield tool calls if any
+    if (toolCalls.length > 0) {
+      yield JSON.stringify({ type: "tool_calls", delta: toolCalls });
+    }
+
+    if (textContent) {
+      yield textContent;
     }
   } catch {
     if (raw.trim()) yield raw.trim();
@@ -445,7 +599,9 @@ export async function* routeLocal(
  */
 export function resolveModel(model: string, config: RouterConfig): ModelSpec {
   if (model.startsWith("openai:")) {
-    return { backend: "openai", modelId: model.slice(7) };
+    const modelId = model.slice(7);
+    if (isResponsesModel(modelId)) return { backend: "responses", modelId };
+    return { backend: "openai", modelId };
   }
   if (model.startsWith("anthropic:")) {
     return { backend: "anthropic", modelId: model.slice(10) };
@@ -482,6 +638,9 @@ export async function* routePrompt(
   switch (spec.backend) {
     case "openai":
       yield* routeOpenAI(prompt, spec.modelId, context, config);
+      break;
+    case "responses":
+      yield* routeResponses(prompt, spec.modelId, context, config);
       break;
     case "anthropic":
       yield* routeAnthropic(prompt, spec.modelId, context, config);

@@ -110,3 +110,72 @@ b {
 .tool-progress-line.complete { opacity: 0.5; }
 .tool-progress-line.complete .spinner { display: none; }
 .tool-progress-line.complete::after { content: ' ✓'; color: #22c55e; }
+
+/* ── Activity Block (reasoning + tool calls) ── */
+.activity-block {
+  margin: 6px 0;
+  border-left: 2px solid var(--accent, #6366f1);
+  border-radius: 4px;
+  background: var(--bg-secondary, #f8f8f8);
+  font-size: 12px;
+  overflow: hidden;
+  animation: fadeInLine 0.2s ease-out;
+}
+.activity-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+  color: var(--text-secondary, #666);
+}
+.activity-header:hover {
+  background: var(--bg-hover, rgba(0,0,0,0.04));
+}
+.activity-icon { font-size: 13px; }
+.activity-label { font-size: 11px; }
+.activity-body {
+  padding: 0 8px 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  transition: max-height 0.2s ease, padding 0.2s ease, opacity 0.2s ease;
+}
+.activity-block.collapsed .activity-body {
+  max-height: 0;
+  padding: 0 8px;
+  opacity: 0;
+  overflow: hidden;
+}
+.activity-block.done .activity-header .activity-label::after {
+  content: ' (click to expand)';
+  font-weight: 400;
+  font-size: 10px;
+  opacity: 0.6;
+}
+.reasoning-content {
+  font-size: 11px;
+  color: var(--text-tertiary, #888);
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 4px;
+  line-height: 1.4;
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+}
+@media (prefers-color-scheme: dark) {
+  .activity-block { background: rgba(255,255,255,0.05); border-left-color: #818cf8; }
+  .activity-header:hover { background: rgba(255,255,255,0.06); }
+}
+
+/* ── Stop button mode ── */
+.send-btn.stop-mode {
+  background: #ef4444 !important;
+  color: white !important;
+  font-size: 14px;
+  line-height: 1;
+}
+.send-btn.stop-mode:hover {
+  background: #dc2626 !important;
+}

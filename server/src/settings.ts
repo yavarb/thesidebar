@@ -36,6 +36,10 @@ export interface SidebarConfig {
   sessionTTLDays?: number;
   /** Reference folders for RAG document retrieval */
   referenceFolders?: string[];
+  /** Workspace path — working directory for the current project/case */
+  workspacePath?: string;
+  /** Precedent folder — example documents the model should reference for style/format */
+  precedentPath?: string;
 }
 
 /** Sensitive field names that should be masked in GET responses */

@@ -138,6 +138,16 @@ function generateChangeSummary(toolName: string, args: Record<string, any>, befo
     case "replaceSelection":
     case "editSelection": {
       const newText = args.text ?? args.replacement ?? "";
+      if (beforeText !== null) {
+        const wordsBefore = beforeText.split(/\s+/).filter(Boolean).length;
+        const wordsAfter = newText.split(/\s+/).filter(Boolean).length;
+        const saved = wordsBefore - wordsAfter;
+        const pct = wordsBefore > 0 ? Math.round((saved / wordsBefore) * 100) : 0;
+        if (saved > 0) {
+          return `Selection: replaced with "${truncate(newText)}" — saved ${saved} words (${pct}% reduction)`;
+        }
+        return `Selection: replaced with "${truncate(newText)}" (${wordsBefore} → ${wordsAfter} words)`;
+      }
       return `Selection: replaced with "${truncate(newText)}"`;
     }
     case "findReplace": {
@@ -422,6 +432,9 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
             console.log("[agent] Anthropic tool complete:", anthropicCurrentTool.name, JSON.stringify(args));
             anthropicCurrentTool = null;
           }
+        } else if (parsed.type === "reasoning") {
+          isToolEvent = true;
+          yield "\n__REASONING__" + JSON.stringify({ content: parsed.content });
         } else if (parsed.type === "openclaw_queued") {
           fullText = chunk;
           isToolEvent = true;
@@ -538,13 +551,22 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
           }
         }
 
-        // Before-fetch: snapshot paragraph text for diff summaries
+        // Before-fetch: snapshot text for diff summaries
         let beforeText: string | null = null;
         if (PARAGRAPH_EDIT_TOOLS.has(call.name)) {
           const idx = call.arguments.index ?? call.arguments.paragraphIndex;
           if (idx !== undefined && typeof idx === "number") {
             beforeText = await fetchParagraphText(serverUrl, idx);
           }
+        }
+        if (call.name === "editSelection" || call.name === "replaceSelection") {
+          try {
+            const selRes = await httpRequest(new URL("/api/selection", serverUrl).toString(), { method: "GET", headers: {} });
+            let selRaw = "";
+            for await (const ch of selRes) selRaw += ch.toString();
+            const selData = JSON.parse(selRaw);
+            beforeText = selData?.text || null;
+          } catch {}
         }
 
         const result = await executeTool(call, serverUrl);

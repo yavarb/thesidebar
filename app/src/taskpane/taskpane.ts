@@ -96,15 +96,33 @@ function smoothScroll(el: HTMLElement) {
 }
 
 let thinkingTimerInterval: any = null;
+let queryInProgress = false;
+
+function setQueryInProgress(active: boolean): void {
+  queryInProgress = active;
+  const sendBtn = document.getElementById("prompt-send") as HTMLButtonElement | null;
+  if (!sendBtn) return;
+  if (active) {
+    sendBtn.textContent = "■";
+    sendBtn.title = "Stop";
+    sendBtn.classList.add("stop-mode");
+  } else {
+    sendBtn.textContent = "↑";
+    sendBtn.title = "Send";
+    sendBtn.classList.remove("stop-mode");
+  }
+}
 
 function addThinkingIndicator(): HTMLElement {
   const history = document.getElementById("prompt-history")!;
+  setQueryInProgress(true);
   const el = document.createElement("div");
   el.className = "chat-thinking";
   el.id = "thinking-indicator";
-  el.innerHTML = '<div class="thinking-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div><span class="thinking-elapsed"></span><button class="thinking-stop" title="Cancel request">■</button>';
-  const stopBtn = el.querySelector(".thinking-stop") as HTMLButtonElement;
-  stopBtn.addEventListener("click", () => {
+  el.innerHTML = '<div class="thinking-dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div><span class="thinking-elapsed"></span>';
+  // Stop button is now in the send button area
+  const legacyStop = document.createElement("span"); // hidden placeholder
+  legacyStop.addEventListener("click", () => {
     // Abort current request via server endpoint
     fetch("http://localhost:3001/api/prompts/abort", { method: "POST" }).catch(() => {});
     removeThinkingIndicator();
@@ -142,6 +160,7 @@ function addThinkingIndicator(): HTMLElement {
 }
 
 function removeThinkingIndicator(): void {
+  setQueryInProgress(false);
   if (thinkingTimerInterval) { clearInterval(thinkingTimerInterval); thinkingTimerInterval = null; }
   const el = document.getElementById("thinking-indicator");
   if (el) el.remove();
@@ -200,7 +219,8 @@ Office.onReady((info) => {
     setupSettingsUI();
     setupTrackChangesToggle();
     setupRefStatus();
-    setupQuickActions();
+    setupTrayIcons();
+  setupQuickActions();
     connectWebSocket();
     // Initialize document session after WebSocket connects
     setTimeout(() => initSession(), 1000);
@@ -397,7 +417,22 @@ function setupPromptUI() {
     input.value = "";
   };
 
-  btn.addEventListener("click", sendPrompt);
+  btn.addEventListener("click", () => {
+    if (queryInProgress) {
+      // Stop the current query
+      fetch("http://localhost:3001/api/prompts/abort", { method: "POST" }).catch(() => {});
+      removeThinkingIndicator();
+      const hist = document.getElementById("prompt-history");
+      if (hist) {
+        const cancelEl = document.createElement("div");
+        cancelEl.className = "chat-entry chat-assistant";
+        cancelEl.innerHTML = '<div class="chat-role">The Sidebar</div><div class="chat-text" style="opacity:0.5;font-style:italic">Request cancelled.</div>';
+        hist.appendChild(cancelEl);
+      }
+      return;
+    }
+    sendPrompt();
+  });
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPrompt(); } });
 
   // New Chat button
@@ -488,6 +523,47 @@ function connectWebSocket() {
 
         const history = document.getElementById("prompt-history")!;
 
+        // Handle reasoning content from thinking models (DeepSeek, QwQ, etc.)
+        if (toolStatus === "reasoning") {
+          removeThinkingIndicator();
+          const reasoningContent = msg.content as string | undefined;
+          if (!reasoningContent) return;
+          // Get or create the activity block
+          let activityBlock = history.querySelector(`[data-activity-for="${promptId}"]`) as HTMLElement | null;
+          if (!activityBlock) {
+            activityBlock = document.createElement("div");
+            activityBlock.className = "activity-block";
+            activityBlock.setAttribute("data-activity-for", String(promptId));
+            const header = document.createElement("div");
+            header.className = "activity-header";
+            header.innerHTML = '<span class="activity-icon">💭</span> <span class="activity-label">Thinking…</span>';
+            header.addEventListener("click", () => activityBlock!.classList.toggle("collapsed"));
+            activityBlock.appendChild(header);
+            const body = document.createElement("div");
+            body.className = "activity-body";
+            activityBlock.appendChild(body);
+            const userEl = history.querySelector(`[data-prompt-id="${promptId}"]`) as HTMLElement | null;
+            if (userEl) userEl.insertAdjacentElement("afterend", activityBlock);
+            else history.appendChild(activityBlock);
+          }
+          let body = activityBlock.querySelector(".activity-body") as HTMLElement;
+          let reasoningEl = body.querySelector(".reasoning-content") as HTMLElement;
+          if (!reasoningEl) {
+            reasoningEl = document.createElement("div");
+            reasoningEl.className = "reasoning-content";
+            body.insertBefore(reasoningEl, body.firstChild);
+          }
+          // Truncate display to last ~500 chars for performance, full content scrollable
+          const maxDisplay = 500;
+          const display = reasoningContent.length > maxDisplay
+            ? "…" + reasoningContent.slice(-maxDisplay)
+            : reasoningContent;
+          reasoningEl.textContent = display;
+          reasoningEl.title = "Model reasoning (click header to collapse)";
+          smoothScroll(history);
+          return;
+        }
+
         // Handle tool phase — model sent text but is now executing tools
         if (toolStatus === "tool_phase") {
           // Re-add thinking indicator with "Executing..." label
@@ -498,34 +574,39 @@ function connectWebSocket() {
           return;
         }
 
-        // Handle tool execution progress
+        // Handle tool execution progress — put in activity block
         if (toolStatus === "tool" && toolName) {
           removeThinkingIndicator();
-          // Get or create the streaming entry to attach tool lines to
-          let streamEl = history.querySelector(`[data-streaming-for="${promptId}"]`) as HTMLElement | null;
-          if (!streamEl) {
-            streamEl = document.createElement("div");
-            streamEl.className = "chat-entry chat-assistant";
-            streamEl.setAttribute("data-streaming-for", String(promptId));
-            const roleEl = document.createElement("div");
-            roleEl.className = "chat-role";
-            roleEl.textContent = "Assistant";
-            const textEl = document.createElement("div");
-            textEl.className = "chat-text streaming-cursor";
-            streamEl.appendChild(roleEl);
-            streamEl.appendChild(textEl);
-            const toolContainer = document.createElement("div");
-            toolContainer.className = "tool-progress-container";
-            streamEl.appendChild(toolContainer);
+          // Get or create activity block
+          let activityBlock = history.querySelector(`[data-activity-for="${promptId}"]`) as HTMLElement | null;
+          if (!activityBlock) {
+            activityBlock = document.createElement("div");
+            activityBlock.className = "activity-block";
+            activityBlock.setAttribute("data-activity-for", String(promptId));
+            const header = document.createElement("div");
+            header.className = "activity-header";
+            header.innerHTML = '<span class="activity-icon">⚙️</span> <span class="activity-label">Working…</span>';
+            header.addEventListener("click", () => activityBlock!.classList.toggle("collapsed"));
+            activityBlock.appendChild(header);
+            const body = document.createElement("div");
+            body.className = "activity-body";
+            activityBlock.appendChild(body);
             const userEl = history.querySelector(`[data-prompt-id="${promptId}"]`) as HTMLElement | null;
-            if (userEl) userEl.insertAdjacentElement("afterend", streamEl);
-            else history.appendChild(streamEl);
+            if (userEl) userEl.insertAdjacentElement("afterend", activityBlock);
+            else history.appendChild(activityBlock);
           }
-          let toolContainer = streamEl.querySelector(".tool-progress-container") as HTMLElement;
+          // Update header to show tool activity
+          const label = activityBlock.querySelector(".activity-label") as HTMLElement;
+          if (label) label.textContent = "Working…";
+          const icon = activityBlock.querySelector(".activity-icon") as HTMLElement;
+          if (icon) icon.textContent = "⚙️";
+
+          const body = activityBlock.querySelector(".activity-body") as HTMLElement;
+          let toolContainer = body.querySelector(".tool-progress-container") as HTMLElement;
           if (!toolContainer) {
             toolContainer = document.createElement("div");
             toolContainer.className = "tool-progress-container";
-            streamEl.appendChild(toolContainer);
+            body.appendChild(toolContainer);
           }
           const line = document.createElement("div");
           line.className = "tool-progress-line";
@@ -537,6 +618,17 @@ function connectWebSocket() {
         }
 
         if (toolStatus === "tool_complete" && toolName) {
+          const activityBlock = history.querySelector(`[data-activity-for="${promptId}"]`) as HTMLElement | null;
+          if (activityBlock) {
+            const lines = activityBlock.querySelectorAll(`.tool-progress-line[data-tool="${toolName}"]:not(.complete)`);
+            const line = lines[lines.length - 1] as HTMLElement | undefined;
+            if (line) {
+              line.classList.add("complete");
+              const spinner = line.querySelector(".spinner");
+              if (spinner) spinner.textContent = "✓";
+            }
+          }
+          // Also check old-style streamEl for backward compat
           const streamEl = history.querySelector(`[data-streaming-for="${promptId}"]`) as HTMLElement | null;
           if (streamEl) {
             const lines = streamEl.querySelectorAll(`.tool-progress-line[data-tool="${toolName}"]:not(.complete)`);
@@ -596,10 +688,28 @@ function connectWebSocket() {
         return;
       }
       if (msg.type === "prompt_response") {
+        // Refresh memory count (extraction happens async after each exchange)
+        setTimeout(refreshMemoryCount, 3000);
         removeThinkingIndicator();
         const promptId = msg.promptId as number | undefined;
         const responseText = msg.text as string | undefined;
         if (!responseText) return;
+        // Collapse the activity block (reasoning + tool calls)
+        if (promptId !== undefined) {
+          const activityBlock = document.getElementById("prompt-history")?.querySelector(`[data-activity-for="${promptId}"]`) as HTMLElement | null;
+          if (activityBlock) {
+            activityBlock.classList.add("collapsed", "done");
+            const label = activityBlock.querySelector(".activity-label") as HTMLElement;
+            // Summarize: count tool lines
+            const toolCount = activityBlock.querySelectorAll(".tool-progress-line").length;
+            const hasReasoning = !!activityBlock.querySelector(".reasoning-content");
+            const parts: string[] = [];
+            if (hasReasoning) parts.push("reasoned");
+            if (toolCount > 0) parts.push(`${toolCount} tool${toolCount > 1 ? "s" : ""}`);
+            if (label && parts.length) label.textContent = parts.join(" + ");
+            else if (label) label.textContent = "Done";
+          }
+        }
         // Capture tool progress lines from streaming preview before removing
         let toolProgressHtml = "";
         if (promptId !== undefined) {
@@ -2228,6 +2338,13 @@ async function loadSettings(): Promise<void> {
     if (openaiKey) openaiKey.value = data.openaiApiKey || "";
     if (anthropicKey) anthropicKey.value = data.anthropicApiKey || "";
 
+    // Populate workspace + precedent
+    const workspaceInput = document.getElementById("settings-workspace-path") as HTMLInputElement;
+    const precedentInput = document.getElementById("settings-precedent-path") as HTMLInputElement;
+    if (workspaceInput) workspaceInput.value = data.workspacePath || "";
+    if (precedentInput) precedentInput.value = data.precedentPath || "";
+    updateTrayIcons(data.workspacePath, data.precedentPath);
+
     // Populate reference folders
     const refContainer = document.getElementById("settings-reference-folders");
     if (refContainer) {
@@ -2447,7 +2564,12 @@ async function saveSettings(): Promise<boolean> {
     });
   }
 
+  const workspacePath = (document.getElementById("settings-workspace-path") as HTMLInputElement)?.value?.trim();
+  const precedentPath = (document.getElementById("settings-precedent-path") as HTMLInputElement)?.value?.trim();
+
   const body: Record<string, any> = {};
+  body.workspacePath = workspacePath || "";
+  body.precedentPath = precedentPath || "";
   if (referenceFolders.length > 0) body.referenceFolders = referenceFolders;
   else body.referenceFolders = [];
   if (openclawUrl) body.openclawUrl = openclawUrl;
@@ -2464,6 +2586,7 @@ async function saveSettings(): Promise<boolean> {
       body: JSON.stringify(body),
     });
     const j = await r.json();
+    if (j?.ok) updateTrayIcons(workspacePath, precedentPath);
     return j?.ok === true;
   } catch (e) {
     console.error("Failed to save settings:", e);
@@ -2666,15 +2789,13 @@ function setupTrackChangesToggle(): void {
   // Tighten button — tightens selected text
   const tightenBtn = document.getElementById("tighten-btn");
   tightenBtn?.addEventListener("click", async () => {
-    const prompt = `Tighten the following selected text. Make it more concise without losing any substance, meaning, or persuasive force. Reduce word count significantly. Do not change the tone or weaken any arguments. Replace the selection with the tightened version.
+    const prompt = `You MUST immediately tighten the selected text using the editSelection tool. Do NOT ask what I want — just do it now. Cut filler words, redundancies, and throat-clearing. Combine sentences where possible. Prefer active voice. Keep every substantive point and the same formality level. Reduce word count significantly without losing meaning or persuasive force. Do not add new content.
 
-Rules:
-- Cut filler words, redundancies, and throat-clearing
-- Combine sentences where possible
-- Prefer active voice
-- Keep every substantive point
-- Maintain the same level of formality
-- Do not add new content`;
+After making the edit, respond with EXACTLY this format:
+**Tightened:** [one-sentence summary of what you cut/changed]
+**Saved:** [X] words ([Y]% reduction)
+
+Count the words in the original and replacement to calculate the savings accurately.`;
     
     const input = document.getElementById("prompt-input") as HTMLTextAreaElement;
     if (input) {
@@ -2730,26 +2851,16 @@ interface QuickActionCategory {
 
 const QUICK_ACTIONS_DEFAULTS: QuickActionCategory[] = [
   {
-    label: "📋 Cite",
+    label: "⚡ Presets",
     actions: [
       { name: "Check Bluebook", prompt: "Review all citations in this document for Bluebook formatting errors. List each error with the paragraph number, the incorrect citation, and the corrected version." },
       { name: "Long/Short Cites", prompt: "Check that every short citation in this document has a corresponding full citation earlier in the document. Flag any short cites that don't match a prior long cite, and any long cites that are repeated unnecessarily." },
       { name: "TOA Pages", prompt: "__DIRECT_ACTION__checkToaPages" },
       { name: "Find Uncited", prompt: "Identify any factual assertions in this document that lack a supporting citation or footnote." },
-    ]
-  },
-  {
-    label: "📝 Format",
-    actions: [
       { name: "Defined Terms", prompt: "Check all defined terms in this document for consistency. Verify that each term is defined before first use, that definitions match usage, and that capitalization is consistent." },
       { name: "House Style", prompt: "Review this document for common style issues: Oxford comma consistency, 'shall' vs 'will' vs 'must', passive voice, legalese that could be simplified, and inconsistent formatting." },
       { name: "Cross-References", prompt: "Check all internal cross-references (e.g., 'See Section 3.2', 'as defined in Article IV') and verify they point to the correct sections." },
       { name: "Clean Up", prompt: "Clean up formatting issues: remove double spaces, fix inconsistent paragraph spacing, normalize quotation marks (smart quotes), and fix any broken numbering." },
-    ]
-  },
-  {
-    label: "🔍 Review",
-    actions: [
       { name: "Summarize", prompt: "Provide a concise summary of this document, including: (1) the type of document, (2) the parties involved, (3) the key terms and obligations, and (4) any notable provisions or risks." },
       { name: "Ambiguities", prompt: "Identify any ambiguous language in this document that could lead to disputes or multiple interpretations. For each instance, explain the ambiguity and suggest clearer language." },
       { name: "Missing Definitions", prompt: "Find any terms in this document that are used as if they are defined terms (e.g., capitalized nouns) but lack a formal definition. List them with suggested definitions." },
@@ -2986,6 +3097,147 @@ function openPromptEditor(opts: {
 
 function closePromptEditor(): void {
   document.getElementById("qa-modal-overlay")?.classList.remove("visible");
+}
+
+function updateTrayIcons(workspace?: string, precedent?: string): void {
+  const wsTray = document.getElementById("workspace-tray");
+  const prTray = document.getElementById("precedent-tray");
+  if (wsTray) {
+    const hasWs = !!workspace;
+    wsTray.style.opacity = hasWs ? "0.8" : "0.4";
+    wsTray.title = hasWs ? `Workspace: ${workspace}` : "Workspace: not set (click to set)";
+  }
+  if (prTray) {
+    const hasPr = !!precedent;
+    prTray.style.opacity = hasPr ? "0.8" : "0.4";
+    prTray.title = hasPr ? `Precedent: ${precedent}` : "Precedent: not set (click to set)";
+  }
+}
+
+async function pickAndSetFolder(field: "workspacePath" | "precedentPath", title: string): Promise<void> {
+  try {
+    const r = await fetch("http://localhost:3001/api/pick-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    const j = await r.json();
+    if (!j?.ok || !j.path) return; // cancelled or error
+
+    // Save to settings
+    const settingsR = await fetch("http://localhost:3001/api/settings");
+    const settingsJ = await settingsR.json();
+    const current = settingsJ?.data || {};
+
+    const body: Record<string, any> = {};
+    body[field] = j.path;
+    // Preserve other settings
+    if (current.workspacePath && field !== "workspacePath") body.workspacePath = current.workspacePath;
+    if (current.precedentPath && field !== "precedentPath") body.precedentPath = current.precedentPath;
+
+    await fetch("http://localhost:3001/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    // Update tray + settings input
+    const ws = field === "workspacePath" ? j.path : (current.workspacePath || "");
+    const pr = field === "precedentPath" ? j.path : (current.precedentPath || "");
+    updateTrayIcons(ws, pr);
+
+    // Also update settings input if panel is open
+    const inputId = field === "workspacePath" ? "settings-workspace-path" : "settings-precedent-path";
+    const input = document.getElementById(inputId) as HTMLInputElement;
+    if (input) input.value = j.path;
+  } catch (e) {
+    console.error("Folder pick failed:", e);
+  }
+}
+
+function setupTrayIcons(): void {
+  const wsTray = document.getElementById("workspace-tray");
+  const prTray = document.getElementById("precedent-tray");
+  wsTray?.addEventListener("click", () => pickAndSetFolder("workspacePath", "Select Workspace Folder"));
+  prTray?.addEventListener("click", () => pickAndSetFolder("precedentPath", "Select Precedent Folder"));
+  // Memory tray — click to view/manage memories
+  const memTray = document.getElementById("memory-tray");
+  memTray?.addEventListener("click", showMemoryPanel);
+  
+  // Load initial state
+  fetch("http://localhost:3001/api/settings").then(r => r.json()).then(j => {
+    if (j?.ok) updateTrayIcons(j.data?.workspacePath, j.data?.precedentPath);
+  }).catch(() => {});
+  refreshMemoryCount();
+}
+
+async function refreshMemoryCount(): Promise<void> {
+  try {
+    const r = await fetch("http://localhost:3001/api/memory");
+    const j = await r.json();
+    const count = j?.entries?.length || 0;
+    const tray = document.getElementById("memory-tray");
+    if (tray) {
+      tray.style.opacity = count > 0 ? "0.8" : "0.4";
+      tray.title = `Memory: ${count} item${count !== 1 ? "s" : ""} learned`;
+    }
+  } catch {}
+}
+
+async function showMemoryPanel(): Promise<void> {
+  try {
+    const r = await fetch("http://localhost:3001/api/memory");
+    const j = await r.json();
+    const entries = j?.entries || [];
+    
+    // Build a simple overlay
+    let existing = document.getElementById("memory-overlay");
+    if (existing) existing.remove();
+    
+    const overlay = document.createElement("div");
+    overlay.id = "memory-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center;";
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+    
+    const panel = document.createElement("div");
+    panel.style.cssText = "background:var(--bg-primary,#fff);border-radius:8px;padding:16px;max-width:90%;max-height:80%;overflow-y:auto;min-width:280px;box-shadow:0 8px 32px rgba(0,0,0,0.2);";
+    
+    let html = "<h3 style=\"margin:0 0 12px;font-size:14px;\">🧠 Learned Memory</h3>";
+    if (entries.length === 0) {
+      html += "<p style=\"color:var(--text-secondary,#888);font-size:12px;\">No memories yet. As you work, I\'ll learn your preferences and corrections.</p>";
+    } else {
+      for (const e of entries) {
+        const icon = e.category === "correction" ? "🔴" : e.category === "preference" ? "🟢" : e.category === "style" ? "🟡" : "🔵";
+        const scope = e.scope === "global" ? "all docs" : "this doc";
+        html += `<div style="display:flex;align-items:start;gap:6px;margin-bottom:8px;font-size:11px;line-height:1.4;">
+          <span>${icon}</span>
+          <span style="flex:1;">${e.text} <span style="opacity:0.5;">(${scope})</span></span>
+          <button data-mem-id="${e.id}" style="background:none;border:none;cursor:pointer;opacity:0.4;font-size:10px;" title="Delete">✕</button>
+        </div>`;
+      }
+    }
+    html += "<div style=\"margin-top:12px;text-align:right;\"><button id=\"memory-close\" style=\"font-size:11px;padding:4px 12px;border:1px solid var(--border,#ddd);border-radius:4px;background:none;cursor:pointer;\">Close</button></div>";
+    
+    panel.innerHTML = html;
+    overlay.appendChild(panel);
+    document.body.appendChild(overlay);
+    
+    document.getElementById("memory-close")?.addEventListener("click", () => overlay.remove());
+    
+    // Delete handlers
+    panel.querySelectorAll("[data-mem-id]").forEach(btn => {
+      btn.addEventListener("click", async (e) => {
+        const id = (e.currentTarget as HTMLElement).getAttribute("data-mem-id");
+        if (!id) return;
+        await fetch(`http://localhost:3001/api/memory/${id}`, { method: "DELETE" });
+        overlay.remove();
+        refreshMemoryCount();
+        showMemoryPanel(); // Refresh
+      });
+    });
+  } catch (e) {
+    console.error("Memory panel error:", e);
+  }
 }
 
 function setupQuickActions(): void {

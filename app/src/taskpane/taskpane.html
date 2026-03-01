@@ -1047,6 +1047,16 @@
           <button class="add-endpoint" id="settings-add-endpoint">+ Add endpoint</button>
         </div>
         <div class="settings-field">
+          <label>Workspace Path</label>
+          <input id="settings-workspace-path" type="text" placeholder="/path/to/project..." />
+          <div style="font-size:10px;color:var(--text-secondary);margin-top:4px;line-height:1.4;">Working directory for this project/case. The model will know where to find your files.</div>
+        </div>
+        <div class="settings-field">
+          <label>Precedent Folder</label>
+          <input id="settings-precedent-path" type="text" placeholder="/path/to/precedent..." />
+          <div style="font-size:10px;color:var(--text-secondary);margin-top:4px;line-height:1.4;">Folder with example documents. The model will reference these for style, formatting, and structure guidance.</div>
+        </div>
+        <div class="settings-field">
           <label>Reference Folders</label>
           <div id="settings-reference-folders"></div>
           <button class="add-endpoint" id="settings-add-folder">+ Add folder</button>
@@ -1104,6 +1114,9 @@
         </div>
         <button class="mode-toggle" id="mode-toggle" title="Toggle Track Changes">⚡ YOLO</button>
         <button class="tighten-btn" id="tighten-btn" title="Tighten selected text — cut words, keep substance">✂️ Tighten</button>
+        <span class="tray-icon" id="workspace-tray" title="Workspace: not set" style="cursor:pointer;font-size:13px;opacity:0.4;transition:opacity 0.2s;">📂</span>
+        <span class="tray-icon" id="precedent-tray" title="Precedent: not set" style="cursor:pointer;font-size:13px;opacity:0.4;transition:opacity 0.2s;">📑</span>
+        <span class="tray-icon" id="memory-tray" title="Memory: 0 items" style="cursor:pointer;font-size:13px;opacity:0.4;transition:opacity 0.2s;">🧠</span>
         <span class="ref-status" id="ref-status" title="Reference documents" style="display:none;">📁 0 docs
           <div class="ref-status-popup" id="ref-status-popup"></div>
         </span>

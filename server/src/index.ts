@@ -1,10 +1,11 @@
 import { parsePageContent, checkToaEntries } from "./toa-checker";
 import { setTrackChanges, isTrackChangesEnabled } from "./track-changes";
+import { buildMemoryContext, addGlobalMemory, addDocMemory, getMemoryEntries, deleteMemoryEntry, MEMORY_EXTRACTION_PROMPT } from "./memory";
 import { runAgentLoop } from "./agent-loop";
 import { v4 as uuidv4 } from "uuid";
 import { saveSession, loadSession, deleteSession, cleanExpiredSessions, ensureMachineKey, SessionData, generateSessionRecap, searchConversationHistory } from "./sessions";
 import { getContextSize, manageContext } from "./context";
-import { resolveModel, cacheStats } from "./llm-router";
+import { resolveModel, cacheStats, routePrompt, RouterConfig } from "./llm-router";
 import { readConfig } from "./settings";
 import { handleGetSettings, handlePostSettings } from "./settings";
 import { queryDocuments, listDocuments as listRefDocs, getStatus as getRefStatus, rescan as rescanRefs, startPeriodicScan, stopPeriodicScan, getDocumentCount as getRefDocCount } from "./references";
@@ -217,6 +218,17 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     // ── Reference Documents (RAG) ──
     const isOpenClawModel = !model.startsWith("openai:") && !model.startsWith("anthropic:") && !model.startsWith("local:");
     const referenceFolders = config.referenceFolders || [];
+    const workspacePath = config.workspacePath || "";
+    const precedentPath = config.precedentPath || "";
+
+    // Build workspace + precedent context for system prompt injection
+    let projectContext = "";
+    if (workspacePath) {
+      projectContext += `\n\nWORKSPACE: ${workspacePath}\nThis is the working directory for the current project. When the user refers to project files, look here first.`;
+    }
+    if (precedentPath) {
+      projectContext += `\n\nPRECEDENT FOLDER: ${precedentPath}\nThis folder contains example/precedent documents. When formatting, structuring, or styling the current document, reference these files for guidance on how things should look. Read them to understand the expected style, structure, footnote format, heading conventions, and tone.`;
+    }
     let referenceContext = "";
 
     if (referenceFolders.length > 0 && !isOpenClawModel) {
@@ -399,6 +411,25 @@ Available tools (HTTP endpoints at http://localhost:3001/api/):
 To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/<endpoint> with JSON body parameters.` + recapAddendum;
       }
     }
+    // Inject learned memory into system prompt
+    const memoryContext = buildMemoryContext(sessionId);
+    if (memoryContext) {
+      if (systemPromptOverride) {
+        systemPromptOverride += memoryContext;
+      } else {
+        systemPromptOverride = "You are a helpful assistant that can read and edit Word documents. Use the provided tools to interact with the document when needed." + memoryContext;
+      }
+    }
+
+    // Append workspace/precedent context to system prompt
+    if (projectContext) {
+      if (systemPromptOverride) {
+        systemPromptOverride += projectContext;
+      } else {
+        systemPromptOverride = "You are a helpful assistant that can read and edit Word documents. Use the provided tools to interact with the document when needed." + projectContext;
+      }
+    }
+
     for await (const chunk of runAgentLoop({
       prompt: fullPrompt,
       model,
@@ -434,6 +465,13 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       }
       // Skip internal control markers
       if (chunk === "\n__TOOL_EXEC_START__") continue;
+      if (chunk.startsWith("\n__REASONING__")) {
+        try {
+          const info = JSON.parse(chunk.substring("\n__REASONING__".length));
+          ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, status: "reasoning", content: info.content }));
+        } catch {}
+        continue;
+      }
       if (chunk.startsWith("\n__TOOL_PHASE__")) {
         try {
           const info = JSON.parse(chunk.substring("\n__TOOL_PHASE__".length));
@@ -450,6 +488,39 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
     // Track conversation history for non-OpenClaw models
     conversationHistory.push({ role: "user", content: fullPrompt, timestamp: Date.now() });
     conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)", timestamp: Date.now() });
+
+    // Memory extraction — learn from this exchange (async, non-blocking)
+    if (!isOpenClaw && fullResponse) {
+      (async () => {
+        try {
+          const exchangeSummary = `User: ${fullPrompt.slice(0, 500)}\nAssistant: ${fullResponse.slice(0, 500)}`;
+          const extractionPrompt = exchangeSummary + "\n\n" + MEMORY_EXTRACTION_PROMPT;
+          let extractionText = "";
+          for await (const chunk of routePrompt(extractionPrompt, model, { messages: [] }, routerConfig)) {
+            try { JSON.parse(chunk); } catch { extractionText += chunk; continue; }
+            extractionText += chunk;
+          }
+          // Parse the JSON array from the response
+          const jsonMatch = extractionText.match(/\[.*\]/s);
+          if (jsonMatch) {
+            const learnings = JSON.parse(jsonMatch[0]);
+            for (const l of learnings) {
+              if (l.text && l.category && l.scope) {
+                const source = `Exchange at ${new Date().toISOString()}`;
+                if (l.scope === "global") {
+                  addGlobalMemory(l.text, l.category, source);
+                } else {
+                  addDocMemory(sessionId, l.text, l.category, source);
+                }
+                console.log(`[memory] Learned (${l.scope}/${l.category}): ${l.text}`);
+              }
+            }
+          }
+        } catch (e: any) {
+          console.error("[memory] Extraction failed:", e.message);
+        }
+      })();
+    }
 
     // Auto-save session
     if (currentSessionData) {
@@ -1204,10 +1275,47 @@ app.get("/api/models/local", async (req, res) => {
   try {
     const baseUrl = req.query.baseUrl as string;
     if (!baseUrl) return res.json({ ok: false, error: "baseUrl required" });
-    const resp = await fetch(`${baseUrl}/v1/models`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(`${baseUrl}/v1/models`, { signal: controller.signal });
+    clearTimeout(timeout);
     const data = await resp.json();
     res.json({ ok: true, data: (data as any).data || [] });
   } catch (e: any) { res.json({ ok: false, error: e.message }); }
+});
+
+// ── Folder Picker (native dialog via osascript on macOS) ──
+app.post("/api/pick-folder", async (req, res) => {
+  const { title } = req.body || {};
+  const dialogTitle = title || "Select Folder";
+  try {
+    const { execSync } = require("child_process");
+    const script = `osascript -e 'tell application "System Events" to activate' -e 'POSIX path of (choose folder with prompt "${dialogTitle.replace(/"/g, '\\"')}")'`;
+    const result = execSync(script, { timeout: 60000, encoding: "utf8" }).trim();
+    if (result) {
+      res.json({ ok: true, path: result.replace(/\/$/, "") });
+    } else {
+      res.json({ ok: false, cancelled: true });
+    }
+  } catch (e: any) {
+    if (e.status === 1 || e.message?.includes("User canceled")) {
+      res.json({ ok: false, cancelled: true });
+    } else {
+      res.json({ ok: false, error: e.message });
+    }
+  }
+});
+
+// ── Memory API ──
+app.get("/api/memory", (req, res) => {
+  const sid = req.query.sessionId as string | undefined;
+  res.json({ ok: true, entries: getMemoryEntries(sid) });
+});
+
+app.delete("/api/memory/:id", (req, res) => {
+  const sid = req.query.sessionId as string | undefined;
+  const deleted = deleteMemoryEntry(req.params.id, sid);
+  res.json({ ok: deleted });
 });
 
 // ── Page Setup ──
