@@ -15,7 +15,13 @@ Built by a litigation partner who uses it daily.
 
 **The Sidebar is the bridge between [OpenClaw](https://github.com/openclaw/openclaw) and Microsoft Word.** If you run OpenClaw, The Sidebar gives your agent full document control — read, edit, footnote, format, cite-check, and rewrite — without copy-pasting between chat and your doc.
 
-Point The Sidebar at your OpenClaw gateway (`http://localhost:18789`) and your agent gets 55+ document tools, encrypted per-document sessions, reference folder RAG, and a real-time task pane UI inside Word. OpenClaw mode passes reference folders as filesystem hints so the agent uses its own judgment instead of blind retrieval.
+Point The Sidebar at your OpenClaw gateway (`http://localhost:18789`) and your agent gets 55+ document tools, encrypted per-document sessions, reference folder RAG, and a real-time task pane UI inside Word.
+
+**Async architecture** — OpenClaw requests run in the background. You get an immediate response while the agent works (researching, browsing, editing), with text streaming progressively into the task pane as results arrive. No more waiting for long agentic loops to complete.
+
+**Two-track editing** — The agent automatically picks the right approach:
+- **Sidebar API** for surgical edits (fix a typo, add a footnote, find/replace)
+- **python-docx + reload** for bulk operations (rewrite a section, restructure the document) — edits the .docx directly, then tells Word to refresh via `POST /api/document/reload`
 
 **Not using OpenClaw?** No problem. The Sidebar works standalone with any LLM provider.
 
@@ -33,7 +39,7 @@ Microsoft Copilot costs $30/month, locks you into one model, and can't even add 
 
 ### 🤖 AI & Models
 - **Model-agnostic** — OpenAI, Anthropic, OpenClaw, Ollama, LM Studio, or any OpenAI-compatible API
-- **OpenClaw integration** — connect your OpenClaw agent directly to Word with full document tool access
+- **OpenClaw integration** — connect your OpenClaw agent directly to Word with async streaming and full document tool access
 - **BYOK (Bring Your Own Keys)** — your credentials, your choice of provider, your data
 - **Agentic loop** — AI plans and executes multi-step document edits autonomously
 - **Token-by-token streaming** — see responses as they generate, with live tool execution ticker
@@ -73,6 +79,7 @@ Microsoft Copilot costs $30/month, locks you into one model, and can't even add 
 - **Revert system** — per-exchange undo, one click to roll back
 - **Inline mini-diffs** — every edit shows a compact before/after summary
 - **Stop button** — cancel in-flight requests instantly
+- **Async OpenClaw mode** — long-running agent tasks stream results progressively instead of blocking
 - **Elapsed timer** — see how long the model has been thinking
 
 ### ✏️ Editing Experience
