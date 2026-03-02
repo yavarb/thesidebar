@@ -289,31 +289,39 @@ async function removeAITraces(): Promise<number> {
   return removed;
 }
 
-/** Initialize or resume a document session */
-async function initSession(): Promise<void> {
-  const existingId = await getDocSessionId();
-  if (existingId) {
-    // Try to resume
-    try {
-      const r = await fetch("http://localhost:3001/api/session/resume", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: existingId }),
-      });
-      const j = await r.json();
-      if (j?.ok && j.data?.found) {
-        currentDocSessionId = existingId;
-        if (j.data.conversationHistory?.length) {
-          repopulateChat(j.data.conversationHistory, j.data.recap);
+/** Initialize or resume a document session (with retry for slow doc loads) */
+async function initSession(retries = 3, delayMs = 1500): Promise<void> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const existingId = await getDocSessionId();
+    if (existingId) {
+      // Try to resume
+      try {
+        const r = await fetch("http://localhost:3001/api/session/resume", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: existingId }),
+        });
+        const j = await r.json();
+        if (j?.ok && j.data?.found) {
+          currentDocSessionId = existingId;
+          if (j.data.conversationHistory?.length) {
+            repopulateChat(j.data.conversationHistory, j.data.recap);
+          }
+          console.log("[session] Resumed:", existingId, `(attempt ${attempt})`);
+          return;
         }
-        console.log("[session] Resumed:", existingId);
-        return;
+      } catch (e) {
+        console.error("[session] Resume failed:", e);
       }
-    } catch (e) {
-      console.error("[session] Resume failed:", e);
+    }
+    // Doc property not ready yet - wait and retry
+    if (attempt < retries) {
+      console.log(`[session] No session ID found, retrying in ${delayMs}ms (attempt ${attempt}/${retries})`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
     }
   }
-  // Start fresh session
+  // All retries exhausted - start fresh session
+  console.log("[session] No existing session found after retries, creating new");
   await createNewSession();
 }
 
