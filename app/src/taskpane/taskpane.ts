@@ -1086,6 +1086,7 @@ async function handleCommand(command: string, params: any): Promise<any> {
       return Word.run(async (ctx) => {
         const { text } = params || {};
         if (text === undefined) throw new Error("params.text required");
+        if (trackChangesMode) throw new Error("replaceSelection is disabled in Track mode. Use granular paragraph/phrase edits instead.");
         const sel = ctx.document.getSelection();
         sel.load("text");
         const para = sel.paragraphs.getFirst();
@@ -1096,10 +1097,11 @@ async function handleCommand(command: string, params: any): Promise<any> {
         const original = sel.text;
         let paraIndex = -1;
         for (let i = 0; i < paragraphs.items.length; i++) { if (paragraphs.items[i] === para) { paraIndex = i; break; } }
-        sel.insertText(text, Word.InsertLocation.replace);
+        const replacement = normalizeSmartQuotes(text);
+        sel.insertText(replacement, Word.InsertLocation.replace);
         await ctx.sync();
-        pushUndo({ command: "replaceSelection", original, replacement: text, paragraphIndex: paraIndex, style: para.style, timestamp: Date.now() });
-        return { original, replacement: text, paragraphIndex: paraIndex, undoAvailable: true };
+        pushUndo({ command: "replaceSelection", original, replacement, paragraphIndex: paraIndex, style: para.style, timestamp: Date.now() });
+        return { original, replacement, paragraphIndex: paraIndex, undoAvailable: true };
       });
 
     case "replaceParagraph":
@@ -1201,11 +1203,16 @@ async function handleCommand(command: string, params: any): Promise<any> {
         const li = para.listItemOrNullObject;
         li.load("listString");
         await ctx.sync();
+
         if (params?.replacement !== undefined) {
+          if (trackChangesMode) {
+            throw new Error("editSelection is disabled in Track mode. Use granular paragraph/phrase edits instead.");
+          }
           const original = sel.text;
-          sel.insertText(params.replacement, Word.InsertLocation.replace);
+          const replacement = normalizeSmartQuotes(params.replacement);
+          sel.insertText(replacement, Word.InsertLocation.replace);
           await ctx.sync();
-          pushUndo({ command: "editSelection", original, replacement: params.replacement, style: sel.style, timestamp: Date.now() });
+          pushUndo({ command: "editSelection", original, replacement, style: sel.style, timestamp: Date.now() });
         }
         return { text: sel.text, style: sel.style, isEmpty: sel.isEmpty, listString: li.isNullObject ? undefined : li.listString, replaced: params?.replacement !== undefined };
       });
@@ -1271,10 +1278,11 @@ async function handleCommand(command: string, params: any): Promise<any> {
       return Word.run(async (ctx) => {
         const { text, replacement, matchCase, matchWholeWord } = params || {};
         if (!text || replacement === undefined) throw new Error("text and replacement required");
+        const normalizedReplacement = normalizeSmartQuotes(replacement);
         const results = ctx.document.body.search(text, { matchCase: matchCase ?? false, matchWholeWord: matchWholeWord ?? false });
         results.load("items"); await ctx.sync();
         const count = results.items.length;
-        for (const item of results.items) item.insertText(replacement, Word.InsertLocation.replace);
+        for (const item of results.items) item.insertText(normalizedReplacement, Word.InsertLocation.replace);
         await ctx.sync();
         return { replacedCount: count };
       });
@@ -2876,13 +2884,21 @@ function setupTrackChangesToggle(): void {
   // Tighten button — tightens selected text
   const tightenBtn = document.getElementById("tighten-btn");
   tightenBtn?.addEventListener("click", async () => {
-    const prompt = `You MUST immediately tighten the selected text using the editSelection tool. Do NOT ask what I want — just do it now. Cut filler words, redundancies, and throat-clearing. Combine sentences where possible. Prefer active voice. Keep every substantive point and the same formality level. Reduce word count significantly without losing meaning or persuasive force. Do not add new content.
+    const prompt = `Tighten the selected text now. Do NOT ask follow-up questions.
 
-After making the edit, respond with EXACTLY this format:
-**Tightened:** [one-sentence summary of what you cut/changed]
+Rules:
+- Preserve meaning and tone.
+- Cut filler, redundancy, and throat-clearing.
+- Prefer active voice and tighter phrasing.
+- Keep formatting intact.
+- Use granular edits (phrase/sentence level), not full-selection replacement.
+- In Track mode, avoid broad paragraph rewrites.
+
+After making edits, respond with EXACTLY:
+**Tightened:** [one-sentence summary of what changed]
 **Saved:** [X] words ([Y]% reduction)
 
-Count the words in the original and replacement to calculate the savings accurately.`;
+Count words in original vs final to compute savings.`;
     
     const input = document.getElementById("prompt-input") as HTMLTextAreaElement;
     if (input) {
