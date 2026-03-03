@@ -602,8 +602,14 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
     // Log what we're sending
     console.log(`[agent] Processing prompt for model="${model}" isOpenClaw=${isOpenClaw} systemPromptLen=${(systemPromptOverride||"").length} docContextLen=${documentContext.length}`);
 
-    // OpenClaw route (approach 1): filesystem python-docx edit + reload
-    if (isOpenClaw) {
+    // OpenClaw routing policy:
+    // - YOLO/off  => approach (1) filesystem python-docx + reload
+    // - Track on  => approach (2) live in-Word tool edits via agent loop
+    const trackModeOn = isTrackChangesEnabled();
+    if (isOpenClaw && !trackModeOn) {
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Mode: YOLO (filesystem edit path)" }));
+      }
       conversationHistory.push({ role: "user", content: fullPrompt, timestamp: Date.now() });
       try {
         const summary = await runOpenClawFilesystemEdit(entry, model, routerConfig, ws);
@@ -614,6 +620,9 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)", timestamp: Date.now() });
 
     } else {
+      if (isOpenClaw && trackModeOn && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Mode: Track (live in-Word edit path)" }));
+      }
 
     for await (const chunk of runAgentLoop({
       prompt: fullPrompt,
@@ -737,8 +746,8 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
     // Clear abort controller
     if (currentAbortController === abortController) currentAbortController = null;
 
-    // Send final response (skip for OpenClaw — handled by background task)
-    if (!isOpenClaw && ws.readyState === 1) {
+    // Send final response
+    if (ws.readyState === 1) {
       ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: fullResponse || "(No response)", timestamp: Date.now(), hasChanges, exchangeId: currentExchangeId, changeSummaries: changeSummaries.length > 0 ? changeSummaries : undefined }));
     }
   } catch (e: any) {
