@@ -101,6 +101,52 @@ type PromptEntry = { id: number; text: string; model?: string; context?: string;
 const promptQueue: PromptEntry[] = [];
 let currentAbortController: AbortController | null = null;
 let lastRestoreMeta: { paragraphIndex?: number; restoredAt: number; note: string } | null = null;
+
+type EditApproach = "filesystem" | "live";
+
+function chooseOpenClawEditApproach(promptText: string, trackModeOn: boolean): { approach: EditApproach; reason: string; scoreFilesystem: number; scoreLive: number } {
+  const t = (promptText || "").toLowerCase();
+
+  const rewriteHints = [
+    "rewrite", "redraft", "restructure", "from scratch", "entire paragraph", "whole paragraph",
+    "rewrite this section", "new draft", "overhaul", "replace this section"
+  ];
+  const surgicalHints = [
+    "tighten", "typo", "grammar", "proofread", "polish", "clarify", "shorten", "trim",
+    "targeted", "phrase", "sentence", "track changes", "redline"
+  ];
+
+  const hasRewriteHint = rewriteHints.some(k => t.includes(k));
+  const hasSurgicalHint = surgicalHints.some(k => t.includes(k));
+
+  // Deterministic safety gates
+  if (trackModeOn && !hasRewriteHint) {
+    return { approach: "live", reason: "Track mode on without explicit rewrite intent", scoreFilesystem: 0, scoreLive: 100 };
+  }
+  if (trackModeOn && hasRewriteHint) {
+    return { approach: "live", reason: "Track mode requires live in-Word edits for redlines", scoreFilesystem: 10, scoreLive: 100 };
+  }
+
+  // Fuzzy scoring for YOLO mode
+  let scoreFilesystem = 0;
+  let scoreLive = 0;
+
+  if (hasRewriteHint) scoreFilesystem += 4;
+  if (hasSurgicalHint) scoreLive += 4;
+
+  if (t.includes("section") || t.includes("multiple paragraphs") || t.includes("across the document")) scoreFilesystem += 2;
+  if (t.includes("selected") || t.includes("this paragraph") || t.includes("this sentence")) scoreLive += 2;
+
+  // Ambiguous defaults to live (safer/transparent)
+  if (Math.abs(scoreFilesystem - scoreLive) <= 1) {
+    return { approach: "live", reason: "Ambiguous intent — defaulting to safer live edits", scoreFilesystem, scoreLive };
+  }
+
+  if (scoreFilesystem > scoreLive) {
+    return { approach: "filesystem", reason: "Rewrite-heavy intent in YOLO mode", scoreFilesystem, scoreLive };
+  }
+  return { approach: "live", reason: "Surgical/tightening intent", scoreFilesystem, scoreLive };
+}
 const promptLog = new Map<number, PromptEntry>();
 let promptId = 0;
 const promptWaiters: { resolve: (v: any) => void; timer: NodeJS.Timeout }[] = [];
@@ -627,13 +673,17 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
     // Log what we're sending
     console.log(`[agent] Processing prompt for model="${model}" isOpenClaw=${isOpenClaw} systemPromptLen=${(systemPromptOverride||"").length} docContextLen=${documentContext.length}`);
 
-    // OpenClaw routing policy:
-    // - YOLO/off  => approach (1) filesystem python-docx + reload
-    // - Track on  => approach (2) live in-Word tool edits via agent loop
+    // OpenClaw routing policy: hybrid deterministic + fuzzy gate between approach (1) and (2)
     const trackModeOn = isTrackChangesEnabled();
-    if (isOpenClaw && !trackModeOn) {
+    const chosen = isOpenClaw ? chooseOpenClawEditApproach(entry.text || fullPrompt, trackModeOn) : null;
+
+    if (isOpenClaw && chosen?.approach === "filesystem") {
       if (ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Mode: YOLO (filesystem edit path)" }));
+        ws.send(JSON.stringify({
+          type: "prompt_progress",
+          promptId: entry.id,
+          text: `Mode: YOLO (filesystem edit path) — ${chosen.reason} [fs:${chosen.scoreFilesystem} live:${chosen.scoreLive}]`,
+        }));
       }
       conversationHistory.push({ role: "user", content: fullPrompt, timestamp: Date.now() });
       try {
@@ -645,8 +695,12 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)", timestamp: Date.now() });
 
     } else {
-      if (isOpenClaw && trackModeOn && ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Mode: Track (live in-Word edit path)" }));
+      if (isOpenClaw && ws.readyState === 1) {
+        ws.send(JSON.stringify({
+          type: "prompt_progress",
+          promptId: entry.id,
+          text: `Mode: ${trackModeOn ? "Track" : "YOLO"} (live in-Word edit path) — ${chosen?.reason || "default"} [fs:${chosen?.scoreFilesystem ?? 0} live:${chosen?.scoreLive ?? 0}]`,
+        }));
       }
 
     for await (const chunk of runAgentLoop({
