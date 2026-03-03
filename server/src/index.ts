@@ -245,6 +245,7 @@ Document path is available via DOC_PATH environment variable.
 Return ONLY JSON with this shape:
 {
   "summary": "short description of edits made",
+  "changes": ["bullet-style change 1", "bullet-style change 2"],
   "python": "complete python3 script that edits DOC_PATH in-place with python-docx and saves"
 }
 
@@ -252,6 +253,7 @@ Requirements:
 - Use python-docx only.
 - Open DOC_PATH, apply requested edits, save DOC_PATH.
 - Use smart quotes in inserted text.
+- Provide 1-10 concise change bullets in "changes".
 - No markdown, no explanation, JSON only.`;
 
   if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Planning edit script…" }));
@@ -273,6 +275,7 @@ Requirements:
   const validated = validateFilesystemEditPayload(parsed);
   const python = validated.python;
   const summary = validated.summary;
+  const modelChanges = Array.isArray(parsed?.changes) ? parsed.changes.slice(0, 20).map((x: any) => String(x)) : [];
 
   if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Applying filesystem edits…" }));
   const tmpPath = path.join("/tmp", `thesidebar-edit-${Date.now()}.py`);
@@ -323,7 +326,12 @@ Requirements:
     }));
   }
 
-  return summary;
+  const bulletLines = modelChanges.length > 0
+    ? modelChanges.map((c: string, i: number) => `${i + 1}. ${c}`).join("\n")
+    : "1. Applied requested document edits.";
+
+  const finalSummary = `${summary}\n\nEdit summary:\n${bulletLines}\n\nReload/context:\n- ${lastRestoreMeta.note}`;
+  return finalSummary;
 }
 
 async function processPrompt(entry: PromptEntry, ws: any) {
