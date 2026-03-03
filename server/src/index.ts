@@ -257,7 +257,14 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     // Build prompt with context
     let fullPrompt = entry.text;
     if (entry.context) {
-      fullPrompt = `[Selected text: ${entry.context}]\n\n${entry.text}`;
+      let contextBlock = entry.context;
+      try {
+        const parsed = JSON.parse(entry.context);
+        if (parsed && typeof parsed === "object") {
+          contextBlock = `Selected context (authoritative anchor metadata): ${JSON.stringify(parsed)}`;
+        }
+      } catch {}
+      fullPrompt = `[${contextBlock}]\n\n${entry.text}`;
     }
 
     // Determine backend for conversation history strategy
@@ -338,9 +345,11 @@ IMPORTANT: Do NOT create new versions of the document. Do NOT use python-docx. D
 
 BEHAVIORAL RULE: When the user asks you to check, fix, or correct something in the document, MAKE THE CHANGES YOURSELF. Do not tell the user to do it manually. Do not suggest they "update fields", "press F9", "regenerate the TOA", or perform any manual steps. You have full editing capability — use it. Report what you found AND fix it.
 
+EDITING SAFETY RULE: Do NOT use editSelection for ordinary document edits. It is selection-state dependent and can apply changes in the wrong location. Prefer replaceParagraph and findReplace for anchored, deterministic edits with cleaner Track Changes output. Use editSelection only when the user explicitly asks to edit the current selection and you have just verified it with readSelection.
+
 Available tools (HTTP endpoints at http://localhost:3001/api/):
 - READ: readDocument, readParagraph, readParagraphs, readSelection, getDocumentStats, getStructure, getToc, getDocumentProperties, getStyles, getStyleDetails, getBookmarks
-- EDIT: replaceParagraph, editSelection, insertText, findReplace, find, deleteParagraph, batch, undo
+- EDIT: replaceParagraph, insertText, findReplace, find, deleteParagraph, batch, undo
 - FORMAT: formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, highlightText, setFontColor, setListFormat, insertBreak
 - FOOTNOTES: addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat
 - COMMENTS: addComment, getComments
@@ -399,9 +408,11 @@ IMPORTANT: Do NOT create new versions of the document. Do NOT use python-docx. D
 
 BEHAVIORAL RULE: When the user asks you to check, fix, or correct something in the document, MAKE THE CHANGES YOURSELF. Do not tell the user to do it manually. Do not suggest they "update fields", "press F9", "regenerate the TOA", or perform any manual steps. You have full editing capability — use it. Report what you found AND fix it.
 
+EDITING SAFETY RULE: Do NOT use editSelection for ordinary document edits. It is selection-state dependent and can apply changes in the wrong location. Prefer replaceParagraph and findReplace for anchored, deterministic edits with cleaner Track Changes output. Use editSelection only when the user explicitly asks to edit the current selection and you have just verified it with readSelection.
+
 Available tools (HTTP endpoints at http://localhost:3001/api/):
 - READ: readDocument, readParagraph, readParagraphs, readSelection, getDocumentStats, getStructure, getToc, getDocumentProperties, getStyles, getStyleDetails, getBookmarks
-- EDIT: replaceParagraph, editSelection, insertText, findReplace, find, deleteParagraph, batch, undo
+- EDIT: replaceParagraph, insertText, findReplace, find, deleteParagraph, batch, undo
 - FORMAT: formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, highlightText, setFontColor, setListFormat, insertBreak
 - FOOTNOTES: addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat
 - COMMENTS: addComment, getComments
@@ -437,8 +448,9 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
     // Log what we're sending
     console.log(`[agent] Processing prompt for model="${model}" isOpenClaw=${isOpenClaw} systemPromptLen=${(systemPromptOverride||"").length} docContextLen=${documentContext.length}`);
 
-    // OpenClaw fast path — async: fire off request, return immediately, deliver result when done
-    if (isOpenClaw) {
+    // OpenClaw fast path is disabled: it can produce empty outputs when responses are tool-call-heavy.
+    // Route OpenClaw through the normal agent loop for deterministic tool execution + final text.
+    if (false && isOpenClaw) {
       const ocContext: any = {
         systemPrompt: systemPromptOverride || undefined,
         documentContext,
@@ -468,20 +480,25 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
               if (parsed.type === "tool_calls") continue;
             } catch {}
             bgResponse += chunk;
-            // Stream progress — replaces the "Working on it" text progressively
+            // Stream compact progress preview (avoid huge UI churn while streaming)
             if (bgWs.readyState === 1) {
-              bgWs.send(JSON.stringify({ type: "prompt_progress", promptId: bgPromptId, text: bgResponse }));
+              const preview = bgResponse.length > 500 ? "…" + bgResponse.slice(-500) : bgResponse;
+              bgWs.send(JSON.stringify({ type: "prompt_progress", promptId: bgPromptId, text: preview }));
             }
           }
         } catch (e: any) {
           bgResponse = `Error: ${e.message}`;
           console.error(`[agent] OpenClaw background error:`, e.message);
         }
+        const finalText = (bgResponse || "").trim()
+          ? bgResponse
+          : "No response from model (empty stream). Please retry — if this repeats, switch model from 'openclaw' to codex/openai temporarily.";
+
         // Update conversation history
-        bgHistory.push({ role: "assistant", content: bgResponse || "(No response)", timestamp: Date.now() });
+        bgHistory.push({ role: "assistant", content: finalText, timestamp: Date.now() });
         // Send single final prompt_response — UI removes streaming bubble, creates final one
         if (bgWs.readyState === 1) {
-          bgWs.send(JSON.stringify({ type: "prompt_response", promptId: bgPromptId, text: bgResponse || "(No response)", timestamp: Date.now(), hasChanges: false, exchangeId: bgExchangeId }));
+          bgWs.send(JSON.stringify({ type: "prompt_response", promptId: bgPromptId, text: finalText, timestamp: Date.now(), hasChanges: false, exchangeId: bgExchangeId }));
         }
         console.log(`[agent] OpenClaw background task complete (${bgResponse.length} chars), first 100: ${bgResponse.substring(0, 100)}`);
       })();

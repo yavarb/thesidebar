@@ -432,14 +432,41 @@ function setupPromptUI() {
     const text = input.value.trim();
     if (!text || !socket || socket.readyState !== WebSocket.OPEN) return;
     
-    // Get current selection for context
+    // Get current selection + stable anchor metadata for context
     let context = "";
     try {
       await Word.run(async (ctx) => {
         const sel = ctx.document.getSelection();
-        sel.load("text");
+        sel.load("text,isEmpty");
+        const selPara = sel.paragraphs.getFirstOrNullObject();
+        selPara.load("text,isListItem");
+        const selLi = selPara.listItemOrNullObject;
+        selLi.load("listString");
+
+        const paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
         await ctx.sync();
-        if (sel.text) context = sel.text.substring(0, 500);
+
+        let paragraphIndex = -1;
+        if (!selPara.isNullObject) {
+          for (let i = 0; i < paragraphs.items.length; i++) {
+            if (paragraphs.items[i] === selPara) {
+              paragraphIndex = i;
+              break;
+            }
+          }
+        }
+
+        if (!sel.isEmpty && sel.text) {
+          const payload: any = {
+            selectedText: sel.text.substring(0, 1000),
+            selectionParagraphIndex: paragraphIndex >= 0 ? paragraphIndex : undefined,
+            selectionParagraphListString: !selLi.isNullObject ? selLi.listString : undefined,
+            selectionParagraphPrefix: !selPara.isNullObject ? (selPara.text || "").substring(0, 120) : undefined,
+            selectionAnchorRule: "Treat selectionParagraphIndex/listString as authoritative anchor. Do not locate by prefix search.",
+          };
+          context = JSON.stringify(payload);
+        }
       });
     } catch {}
     
