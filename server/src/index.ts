@@ -179,6 +179,87 @@ const TOOL_PROGRESS: Record<string, (args: any) => string> = {
   getPageNumbers: () => "📋 Getting page info...",
 };
 
+async function getActiveWordDocPath(): Promise<string> {
+  const { execSync } = require("child_process");
+  const docPath = execSync(
+    `osascript -e 'tell application "Microsoft Word" to return POSIX path of (full name of active document as text)'`,
+    { encoding: "utf-8", timeout: 5000 }
+  ).trim();
+  if (!docPath || docPath === "missing value") throw new Error("No active document in Word");
+  return docPath;
+}
+
+function extractFirstJsonObject(text: string): any {
+  const m = text.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error("Model did not return JSON");
+  return JSON.parse(m[0]);
+}
+
+async function runOpenClawFilesystemEdit(entry: PromptEntry, model: string, routerConfig: RouterConfig, ws: any): Promise<string> {
+  const docPath = await getActiveWordDocPath();
+  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Reading document path…" }));
+
+  const ocPrompt = `You are editing a Microsoft Word .docx file on disk using python-docx.
+
+User request:
+${entry.text}
+
+Document path is available via DOC_PATH environment variable.
+
+Return ONLY JSON with this shape:
+{
+  "summary": "short description of edits made",
+  "python": "complete python3 script that edits DOC_PATH in-place with python-docx and saves"
+}
+
+Requirements:
+- Use python-docx only.
+- Open DOC_PATH, apply requested edits, save DOC_PATH.
+- Use smart quotes in inserted text.
+- No markdown, no explanation, JSON only.`;
+
+  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Planning edit script…" }));
+
+  let raw = "";
+  for await (const chunk of routePrompt(ocPrompt, model, { messages: [], sessionUser: "thesidebar:" + sessionId }, routerConfig)) {
+    try {
+      const p = JSON.parse(chunk);
+      if (p?.type) continue;
+    } catch {}
+    raw += chunk;
+    if (ws.readyState === 1) {
+      const preview = raw.length > 220 ? "…" + raw.slice(-220) : raw;
+      ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: `Planning edit script… ${preview}` }));
+    }
+  }
+
+  const parsed = extractFirstJsonObject(raw);
+  const python = (parsed?.python || "").toString();
+  const summary = (parsed?.summary || "Updated document.").toString();
+  if (!python.trim()) throw new Error("No python script returned");
+
+  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Applying filesystem edits…" }));
+  const tmpPath = path.join("/tmp", `thesidebar-edit-${Date.now()}.py`);
+  fs.writeFileSync(tmpPath, python, "utf-8");
+  try {
+    const { execFileSync } = require("child_process");
+    execFileSync("python3", [tmpPath], {
+      env: { ...process.env, DOC_PATH: docPath },
+      stdio: "pipe",
+      timeout: 120000,
+      encoding: "utf-8",
+    });
+  } finally {
+    try { fs.unlinkSync(tmpPath); } catch {}
+  }
+
+  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Reloading Word document…" }));
+  const { execSync } = require("child_process");
+  execSync(`osascript -e 'tell application "Microsoft Word" to close active document saving no' -e 'delay 0.3' -e 'tell application "Microsoft Word" to open "${docPath}"' -e 'tell application "Microsoft Word" to activate'`, { encoding: "utf-8", timeout: 15000 });
+
+  return summary;
+}
+
 async function processPrompt(entry: PromptEntry, ws: any) {
   const abortController = new AbortController();
   currentAbortController = abortController;
@@ -448,61 +529,16 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
     // Log what we're sending
     console.log(`[agent] Processing prompt for model="${model}" isOpenClaw=${isOpenClaw} systemPromptLen=${(systemPromptOverride||"").length} docContextLen=${documentContext.length}`);
 
-    // OpenClaw fast path is disabled: it can produce empty outputs when responses are tool-call-heavy.
-    // Route OpenClaw through the normal agent loop for deterministic tool execution + final text.
-    if (false && isOpenClaw) {
-      const ocContext: any = {
-        systemPrompt: systemPromptOverride || undefined,
-        documentContext,
-        messages: [],
-        sessionUser: "thesidebar:" + sessionId,
-      };
-      console.log(`[agent] OpenClaw async: dispatching to OpenClaw`);
-
-      // Show "Working on it" as streaming progress (not a final response)
+    // OpenClaw route (approach 1): filesystem python-docx edit + reload
+    if (isOpenClaw) {
       conversationHistory.push({ role: "user", content: fullPrompt, timestamp: Date.now() });
-      if (ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "⌛ Working on it…" }));
+      try {
+        const summary = await runOpenClawFilesystemEdit(entry, model, routerConfig, ws);
+        fullResponse = summary || "Updated document via filesystem edit + reload.";
+      } catch (e: any) {
+        fullResponse = `OpenClaw filesystem edit failed: ${e?.message || "unknown error"}`;
       }
-
-      // Fire off the real work in the background
-      const bgPromptId = entry.id;
-      const bgExchangeId = currentExchangeId;
-      const bgWs = ws;
-      const bgHistory = conversationHistory;
-      (async () => {
-        let bgResponse = "";
-        try {
-          for await (const chunk of routePrompt(fullPrompt, model, ocContext, routerConfig)) {
-            try {
-              const parsed = JSON.parse(chunk);
-              if (parsed.type === "reasoning") continue;
-              if (parsed.type === "tool_calls") continue;
-            } catch {}
-            bgResponse += chunk;
-            // Stream compact progress preview (avoid huge UI churn while streaming)
-            if (bgWs.readyState === 1) {
-              const preview = bgResponse.length > 500 ? "…" + bgResponse.slice(-500) : bgResponse;
-              bgWs.send(JSON.stringify({ type: "prompt_progress", promptId: bgPromptId, text: preview }));
-            }
-          }
-        } catch (e: any) {
-          bgResponse = `Error: ${e.message}`;
-          console.error(`[agent] OpenClaw background error:`, e.message);
-        }
-        const finalText = (bgResponse || "").trim()
-          ? bgResponse
-          : "No response from model (empty stream). Please retry — if this repeats, switch model from 'openclaw' to codex/openai temporarily.";
-
-        // Update conversation history
-        bgHistory.push({ role: "assistant", content: finalText, timestamp: Date.now() });
-        // Send single final prompt_response — UI removes streaming bubble, creates final one
-        if (bgWs.readyState === 1) {
-          bgWs.send(JSON.stringify({ type: "prompt_response", promptId: bgPromptId, text: finalText, timestamp: Date.now(), hasChanges: false, exchangeId: bgExchangeId }));
-        }
-        console.log(`[agent] OpenClaw background task complete (${bgResponse.length} chars), first 100: ${bgResponse.substring(0, 100)}`);
-      })();
-      // Don't await — continue processing queue immediately
+      conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)", timestamp: Date.now() });
 
     } else {
 
