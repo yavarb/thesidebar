@@ -307,7 +307,8 @@ Return ONLY JSON with this shape:
 Requirements:
 - Use python-docx only.
 - Open DOC_PATH, apply requested edits, save DOC_PATH.
-- Use smart quotes in inserted text.
+- SMART QUOTES ONLY (non-negotiable): double quotes must be “ ” and single quotes must be ‘ ’ in all inserted/replaced text.
+- Never use straight quotes in inserted/replaced text.
 - Provide 1-10 concise change bullets in "changes".
 - No markdown, no explanation, JSON only.`;
 
@@ -459,7 +460,8 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     }
 
     // Build prompt with context
-    let fullPrompt = entry.text;
+    const quoteRule = "NON-NEGOTIABLE EDIT RULE: Whenever you insert or replace quotation marks, use curly smart quotes only (double: “ ”, single: ‘ ’). Never use straight quotes (\" or ').";
+    let fullPrompt = `${quoteRule}\n\n${entry.text}`;
     let restoreContextPrefix = "";
     if (lastRestoreMeta && Date.now() - lastRestoreMeta.restoredAt < 15 * 60 * 1000) {
       restoreContextPrefix = `[Post-reload context: ${JSON.stringify(lastRestoreMeta)}]\n\n`;
