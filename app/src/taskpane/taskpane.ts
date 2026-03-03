@@ -168,6 +168,37 @@ function removeThinkingIndicator(): void {
 
 
 
+
+function resolveUserEntryForPrompt(promptId: number): HTMLElement | null {
+  const history = document.getElementById("prompt-history")!;
+  let userEl = history.querySelector(`[data-prompt-id="${promptId}"]`) as HTMLElement | null;
+  if (userEl) return userEl;
+
+  // Fallback: if progress arrives before ack, attach this promptId to the most recent pending user bubble.
+  const pending = Array.from(pendingPromptEls.values());
+  if (pending.length > 0) {
+    userEl = pending[pending.length - 1] as HTMLElement;
+    userEl.setAttribute("data-prompt-id", String(promptId));
+    return userEl;
+  }
+
+  return null;
+}
+
+
+function compactStreamingPreview(text: string): string {
+  const cleaned = (text || "").replace(/\s+/g, " ").trim();
+  if (!cleaned) return "Drafting…";
+  if (cleaned.length <= 140) return cleaned;
+  return "…" + cleaned.slice(-140);
+}
+
+function summarizeStreamingState(progressLabel?: string, progressText?: string): string {
+  if (progressLabel && progressLabel.trim()) return progressLabel.trim();
+  if (progressText && progressText.trim()) return compactStreamingPreview(progressText);
+  return "Working…";
+}
+
 function appendChatEntry(role: "user" | "assistant", text: string, status?: string): HTMLElement {
   const history = document.getElementById("prompt-history")!;
   const el = document.createElement("div");
@@ -550,7 +581,7 @@ function connectWebSocket() {
             const body = document.createElement("div");
             body.className = "activity-body";
             activityBlock.appendChild(body);
-            const userEl = history.querySelector(`[data-prompt-id="${promptId}"]`) as HTMLElement | null;
+            const userEl = resolveUserEntryForPrompt(promptId);
             if (userEl) userEl.insertAdjacentElement("afterend", activityBlock);
             else history.appendChild(activityBlock);
           }
@@ -599,7 +630,7 @@ function connectWebSocket() {
             const body = document.createElement("div");
             body.className = "activity-body";
             activityBlock.appendChild(body);
-            const userEl = history.querySelector(`[data-prompt-id="${promptId}"]`) as HTMLElement | null;
+            const userEl = resolveUserEntryForPrompt(promptId);
             if (userEl) userEl.insertAdjacentElement("afterend", activityBlock);
             else history.appendChild(activityBlock);
           }
@@ -676,19 +707,19 @@ function connectWebSocket() {
           roleEl.textContent = "Assistant";
           const textEl = document.createElement("div");
           textEl.className = "chat-text streaming-cursor";
-          textEl.textContent = progressText;
+          textEl.textContent = summarizeStreamingState(progressLabel, progressText);
           streamEl.appendChild(roleEl);
           streamEl.appendChild(textEl);
           const toolContainer = document.createElement("div");
           toolContainer.className = "tool-progress-container";
           streamEl.appendChild(toolContainer);
-          const userEl = history.querySelector(`[data-prompt-id="${promptId}"]`) as HTMLElement | null;
+          const userEl = resolveUserEntryForPrompt(promptId);
           if (userEl) userEl.insertAdjacentElement("afterend", streamEl);
           else history.appendChild(streamEl);
         } else {
           const textEl = streamEl.querySelector(".chat-text") as HTMLElement;
           if (textEl) {
-            textEl.textContent = progressText;
+            textEl.textContent = summarizeStreamingState(progressLabel, progressText);
             textEl.classList.add("streaming-cursor");
           }
         }
@@ -1085,49 +1116,80 @@ async function handleCommand(command: string, params: any): Promise<any> {
           if (paraIndex === undefined) throw new Error(`listString "${targetLS}" not found`);
         }
         if (paraIndex === undefined || text === undefined) throw new Error("index/listString and text required");
+
         const paragraphs = ctx.document.body.paragraphs; paragraphs.load("items"); await ctx.sync();
         if (paraIndex < 0 || paraIndex >= paragraphs.items.length) throw new Error(`index ${paraIndex} out of range`);
-        const p = paragraphs.items[paraIndex]; p.load("text,style"); await ctx.sync();
+
+        const p = paragraphs.items[paraIndex];
+        p.load("text,style");
+        await ctx.sync();
+
         const original = p.text;
-        
-        // Format-preserving edit: if text changed, try to do minimal find/replace
-        // to preserve inline formatting (bold, italic, etc.)
-        if (original === text) {
-          return { index: paraIndex, changed: false };
-        }
-        
-        // Strategy: find the longest common prefix and suffix, replace only the middle
+        const desired = normalizeSmartQuotes(text);
+        if (original === desired) return { index: paraIndex, changed: false };
+
+        // Compute minimal middle replacement window.
         let prefixLen = 0;
-        while (prefixLen < original.length && prefixLen < text.length && original[prefixLen] === text[prefixLen]) prefixLen++;
+        while (prefixLen < original.length && prefixLen < desired.length && original[prefixLen] === desired[prefixLen]) prefixLen++;
+
         let suffixLen = 0;
-        while (suffixLen < (original.length - prefixLen) && suffixLen < (text.length - prefixLen) && 
-               original[original.length - 1 - suffixLen] === text[text.length - 1 - suffixLen]) suffixLen++;
-        
+        while (
+          suffixLen < (original.length - prefixLen) &&
+          suffixLen < (desired.length - prefixLen) &&
+          original[original.length - 1 - suffixLen] === desired[desired.length - 1 - suffixLen]
+        ) suffixLen++;
+
         const oldMiddle = original.substring(prefixLen, original.length - suffixLen);
-        const newMiddle = text.substring(prefixLen, text.length - suffixLen);
-        
+        const newMiddle = desired.substring(prefixLen, desired.length - suffixLen);
+        const trackMode = !!trackChangesMode;
+
+        // Strict tracked-edit guardrail: block broad rewrites in Track mode.
+        const changedChars = oldMiddle.length;
+        const totalChars = Math.max(1, original.length);
+        const changedRatio = changedChars / totalChars;
+        const isBroadRewrite = changedChars === totalChars || changedRatio > 0.6;
+        if (trackMode && isBroadRewrite) {
+          throw new Error("Track mode blocks broad paragraph rewrites. Please apply smaller sentence/phrase edits.");
+        }
+
         if (oldMiddle.length > 0 && oldMiddle.length < original.length) {
-          // Partial replacement — preserves formatting on unchanged parts
+          // Best case: patch only the changed span.
           const searchResults = p.search(oldMiddle, { matchCase: true });
           searchResults.load("items");
           await ctx.sync();
           if (searchResults.items.length > 0) {
             searchResults.items[0].insertText(newMiddle, Word.InsertLocation.replace);
             await ctx.sync();
-          } else {
-            // Fallback: full replacement if search fails
+          } else if (!trackMode) {
             const range = p.getRange(Word.RangeLocation.content);
-            range.insertText(normalizeSmartQuotes(text), Word.InsertLocation.replace);
+            range.insertText(desired, Word.InsertLocation.replace);
+            await ctx.sync();
+          } else {
+            throw new Error("Could not apply a granular tracked edit. Please retry with a narrower change.");
+          }
+        } else if (!trackMode) {
+          // YOLO mode: allow full paragraph replacement.
+          const range = p.getRange(Word.RangeLocation.content);
+          range.insertText(desired, Word.InsertLocation.replace);
+          await ctx.sync();
+        } else {
+          // Track mode: avoid one-shot full replacement. Do delete + insert as separate revisions.
+          const contentRange = p.getRange(Word.RangeLocation.content);
+          contentRange.load("text");
+          await ctx.sync();
+
+          if (contentRange.text && contentRange.text.length > 0) {
+            contentRange.insertText("", Word.InsertLocation.replace);
             await ctx.sync();
           }
-        } else {
-          // Complete rewrite — no choice but full replacement
-          const range = p.getRange(Word.RangeLocation.content);
-          range.insertText(normalizeSmartQuotes(text), Word.InsertLocation.replace);
+
+          const refreshed = p.getRange(Word.RangeLocation.content);
+          refreshed.insertText(desired, Word.InsertLocation.start);
           await ctx.sync();
         }
-        pushUndo({ command: "replaceParagraph", original, replacement: text, paragraphIndex: paraIndex, style: p.style, timestamp: Date.now() });
-        return { original, replacement: text, paragraphIndex: paraIndex, undoAvailable: true };
+
+        pushUndo({ command: "replaceParagraph", original, replacement: desired, paragraphIndex: paraIndex, style: p.style, timestamp: Date.now() });
+        return { original, replacement: desired, paragraphIndex: paraIndex, undoAvailable: true, trackMode };
       });
 
     case "editSelection":
@@ -2759,30 +2821,46 @@ function setupRefStatus(): void {
 // ── Track Changes / YOLO Mode ──
 let trackChangesMode = false;
 
+function setModeToggleVisual(modeToggle: HTMLElement, enabled: boolean): void {
+  modeToggle.textContent = enabled ? "🔍 Track" : "⚡ YOLO";
+  modeToggle.classList.toggle("tracking", enabled);
+}
+
+async function applyTrackChangesMode(desired: boolean): Promise<boolean> {
+  try {
+    return await Word.run(async (context) => {
+      context.document.changeTrackingMode = desired
+        ? Word.ChangeTrackingMode.trackAll
+        : Word.ChangeTrackingMode.off;
+      context.document.load("changeTrackingMode");
+      await context.sync();
+      const actual = context.document.changeTrackingMode;
+      if (desired) return actual === Word.ChangeTrackingMode.trackAll;
+      return actual === Word.ChangeTrackingMode.off;
+    });
+  } catch (e) {
+    console.warn("changeTrackingMode not available:", e);
+    return false;
+  }
+}
+
 function setupTrackChangesToggle(): void {
   const modeToggle = document.getElementById("mode-toggle");
   if (!modeToggle) return;
 
   modeToggle.addEventListener("click", async () => {
-    trackChangesMode = !trackChangesMode;
-    modeToggle.textContent = trackChangesMode ? "🔍 Track" : "⚡ YOLO";
-    modeToggle.classList.toggle("tracking", trackChangesMode);
+    const desired = !trackChangesMode;
+    const confirmed = await applyTrackChangesMode(desired);
 
-    // Tell Word to enable/disable track changes
-    try {
-      await Word.run(async (context) => {
-        if (trackChangesMode) {
-          context.document.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
-        } else {
-          context.document.changeTrackingMode = Word.ChangeTrackingMode.off;
-        }
-        await context.sync();
-      });
-    } catch (e) {
-      console.warn("changeTrackingMode not available:", e);
+    trackChangesMode = confirmed ? desired : false;
+    setModeToggleVisual(modeToggle, trackChangesMode);
+
+    if (!confirmed && desired) {
+      appendChatEntry("assistant", "Track Changes could not be enabled via Word API on this setup. Please turn on Track Changes in Word manually, then try again.");
+      localStorage.removeItem("sidebar-track-changes");
     }
 
-    // Tell the server
+    // Tell the server the confirmed state
     fetch("http://localhost:3001/api/settings/mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2790,7 +2868,8 @@ function setupTrackChangesToggle(): void {
     }).catch(() => {});
 
     // Persist preference
-    localStorage.setItem("sidebar-track-changes", String(trackChangesMode));
+    if (trackChangesMode) localStorage.setItem("sidebar-track-changes", "true");
+    else localStorage.removeItem("sidebar-track-changes");
   });
 
   
@@ -2814,22 +2893,24 @@ Count the words in the original and replacement to calculate the savings accurat
     }
   });
 
-  // Restore on load
+  // Restore on load (verify Word accepted it before showing Track mode)
   const savedMode = localStorage.getItem("sidebar-track-changes");
   if (savedMode === "true") {
-    trackChangesMode = true;
-    modeToggle.textContent = "🔍 Track";
-    modeToggle.classList.add("tracking");
-    Word.run(async (context) => {
-      context.document.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
-      await context.sync();
-    }).catch(() => {});
-    // Also tell server on load
-    fetch("http://localhost:3001/api/settings/mode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ trackChanges: true }),
-    }).catch(() => {});
+    applyTrackChangesMode(true).then((confirmed) => {
+      trackChangesMode = confirmed;
+      setModeToggleVisual(modeToggle, trackChangesMode);
+      if (!confirmed) {
+        localStorage.removeItem("sidebar-track-changes");
+        appendChatEntry("assistant", "Track Changes preference was saved, but Word did not accept Track mode in this session. Using YOLO until Track Changes is enabled in Word.");
+      }
+      fetch("http://localhost:3001/api/settings/mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trackChanges: trackChangesMode }),
+      }).catch(() => {});
+    });
+  } else {
+    setModeToggleVisual(modeToggle, false);
   }
 
   // Restore original state when leaving
