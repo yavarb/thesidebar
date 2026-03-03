@@ -471,8 +471,10 @@ function setupPromptUI() {
     } catch {}
     
     const clientId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const model = modelSelect?.value || selectedModel || undefined;
+    const forcedModel = (input as any)._forceModel as string | undefined;
+    const model = forcedModel || modelSelect?.value || selectedModel || undefined;
     socket.send(JSON.stringify({ type: "prompt", clientId, text, model, context: context || undefined }));
+    delete (input as any)._forceModel;
 
     // Show clean label for quick actions, full text for manual prompts
     const displayText = (input as any)._displayLabel || text;
@@ -2898,6 +2900,7 @@ Count words in original vs final to compute savings.`;
     if (input) {
       input.value = prompt;
       (input as any)._displayLabel = "✂️ Tighten selection";
+      (input as any)._forceModel = "openai:gpt-5.3-codex";
       const sendBtn = document.getElementById("prompt-send") as HTMLButtonElement;
       sendBtn?.click();
     }
