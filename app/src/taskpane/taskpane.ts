@@ -706,6 +706,34 @@ function connectWebSocket() {
           return;
         }
 
+        if (toolStatus === "context_restored") {
+          const note = (msg.note as string | undefined) || "Context restored";
+          let activityBlock = history.querySelector(`[data-activity-for="${promptId}"]`) as HTMLElement | null;
+          if (!activityBlock) {
+            activityBlock = document.createElement("div");
+            activityBlock.className = "activity-block";
+            activityBlock.setAttribute("data-activity-for", String(promptId));
+            const header = document.createElement("div");
+            header.className = "activity-header";
+            header.innerHTML = '<span class="activity-icon">♻️</span> <span class="activity-label">Context restored</span>';
+            header.addEventListener("click", () => activityBlock!.classList.toggle("collapsed"));
+            activityBlock.appendChild(header);
+            const body = document.createElement("div");
+            body.className = "activity-body";
+            activityBlock.appendChild(body);
+            const userEl = resolveUserEntryForPrompt(promptId);
+            if (userEl) userEl.insertAdjacentElement("afterend", activityBlock);
+            else history.appendChild(activityBlock);
+          }
+          const body = activityBlock.querySelector(".activity-body") as HTMLElement;
+          const line = document.createElement("div");
+          line.className = "tool-progress-line complete";
+          line.innerHTML = `<span class="spinner">✓</span> ${escapeHtml(note)}`;
+          body.appendChild(line);
+          smoothScroll(history);
+          return;
+        }
+
         // If we have a descriptive progress label (tool activity), show it in thinking indicator
         if (progressLabel && !progressText) {
           const thinkingEl = document.getElementById("thinking-indicator");

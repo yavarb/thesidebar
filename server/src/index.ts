@@ -100,6 +100,7 @@ const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) =>
 type PromptEntry = { id: number; text: string; model?: string; context?: string; timestamp: number; clientId?: string };
 const promptQueue: PromptEntry[] = [];
 let currentAbortController: AbortController | null = null;
+let lastRestoreMeta: { paragraphIndex?: number; restoredAt: number; note: string } | null = null;
 const promptLog = new Map<number, PromptEntry>();
 let promptId = 0;
 const promptWaiters: { resolve: (v: any) => void; timer: NodeJS.Timeout }[] = [];
@@ -294,11 +295,32 @@ Requirements:
 
   // Best-effort context restoration after reload.
   if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Restoring context…" }));
+  let restored = false;
   if (typeof restoreIndex === "number") {
     try {
       await new Promise(r => setTimeout(r, 1200));
       await sendCommand("selectParagraph", { index: restoreIndex }, 10000);
+      restored = true;
     } catch {}
+  }
+
+  lastRestoreMeta = {
+    paragraphIndex: restoreIndex,
+    restoredAt: Date.now(),
+    note: restored
+      ? `Context restored to paragraph ${restoreIndex}`
+      : "Document reloaded; exact paragraph restore not confirmed",
+  };
+
+  if (ws.readyState === 1) {
+    ws.send(JSON.stringify({
+      type: "prompt_progress",
+      promptId: entry.id,
+      status: "context_restored",
+      restored,
+      paragraphIndex: restoreIndex,
+      note: lastRestoreMeta.note,
+    }));
   }
 
   return summary;
@@ -381,6 +403,11 @@ async function processPrompt(entry: PromptEntry, ws: any) {
 
     // Build prompt with context
     let fullPrompt = entry.text;
+    let restoreContextPrefix = "";
+    if (lastRestoreMeta && Date.now() - lastRestoreMeta.restoredAt < 15 * 60 * 1000) {
+      restoreContextPrefix = `[Post-reload context: ${JSON.stringify(lastRestoreMeta)}]\n\n`;
+    }
+
     if (entry.context) {
       let contextBlock = entry.context;
       try {
@@ -389,7 +416,9 @@ async function processPrompt(entry: PromptEntry, ws: any) {
           contextBlock = `Selected context (authoritative anchor metadata): ${JSON.stringify(parsed)}`;
         }
       } catch {}
-      fullPrompt = `[${contextBlock}]\n\n${entry.text}`;
+      fullPrompt = `${restoreContextPrefix}[${contextBlock}]\n\n${entry.text}`;
+    } else if (restoreContextPrefix) {
+      fullPrompt = `${restoreContextPrefix}${entry.text}`;
     }
 
     // Determine backend for conversation history strategy
