@@ -77,14 +77,6 @@ async function buildDocumentIndex(): Promise<typeof documentIndex> {
   }
 }
 
-async function getDocumentContext(): Promise<string> {
-  if (documentIndex && (Date.now() - documentIndex.builtAt) < 30000) {
-    return documentIndex.paragraphs.map(p => p.text).join("\n");
-  }
-  await buildDocumentIndex();
-  return documentIndex ? documentIndex.paragraphs.map(p => p.text).join("\n") : "";
-}
-
 function invalidateIndex(): void {
   if (documentIndex) {
     documentIndex.builtAt = 0; // Mark as stale
@@ -405,25 +397,19 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     const config = readConfig();
     const model = entry.model || config.defaultModel || "openclaw";
 
-    // Get document context (from cache if fresh)
+    // Get compact document context; detailed reads happen on demand via tools.
     let documentContext = "";
     try {
-      if (false) {
-        // Previously sent full doc for OpenClaw — now all models get compact summary
-        documentContext = await getDocumentContext();
+      const stats = await sendCommand("getDocumentStats", {});
+      const structure = await sendCommand("getDocumentStructure", {});
+      documentContext = `Document: ${stats?.wordCount || "?"} words, ${stats?.paragraphCount || "?"} paragraphs, ${stats?.footnoteCount || "?"} footnotes, ${stats?.sectionCount || "?"} sections.\n`;
+      if (structure?.headings?.length) {
+        documentContext += "Structure:\n" + structure.headings.map((h: any) => `${"  ".repeat((h.level || 1) - 1)}${h.text}`).join("\n");
+      }
+      if (!model.startsWith("openai:") && !model.startsWith("anthropic:") && !model.startsWith("local:")) {
+        documentContext += "\n\nYou are operating through The Sidebar Word add-in. To read or edit document content, use curl to call the Sidebar API at http://localhost:3001 (see Integration Protocol in MEMORY.md). Read relevant sections before making edits.";
       } else {
-        // Direct API models have native tool access — send compact summary, let them read on demand
-        const stats = await sendCommand("getDocumentStats", {});
-        const structure = await sendCommand("getDocumentStructure", {});
-        documentContext = `Document: ${stats?.wordCount || "?"} words, ${stats?.paragraphCount || "?"} paragraphs, ${stats?.footnoteCount || "?"} footnotes, ${stats?.sectionCount || "?"} sections.\n`;
-        if (structure?.headings?.length) {
-          documentContext += "Structure:\n" + structure.headings.map((h: any) => `${"  ".repeat((h.level || 1) - 1)}${h.text}`).join("\n");
-        }
-        if (!model.startsWith("openai:") && !model.startsWith("anthropic:") && !model.startsWith("local:")) {
-          documentContext += "\n\nYou are operating through The Sidebar Word add-in. To read or edit document content, use curl to call the Sidebar API at http://localhost:3001 (see Integration Protocol in MEMORY.md). Read the relevant sections before making edits to avoid duplicating existing content.";
-        } else {
-          documentContext += "\n\nUse readDocument, readParagraph, or readParagraphs tools to read specific content as needed. Do NOT ask the user what to read \u2014 just read it.";
-        }
+        documentContext += "\n\nUse readDocument/readParagraph/readParagraphs as needed. Do not ask the user what to read — read it.";
       }
     } catch (e: any) {
       console.error("[agent] Failed to get document:", e.message);
@@ -492,16 +478,10 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       fullPrompt = `${restoreContextPrefix}${entry.text}`;
     }
 
-    // Determine backend for conversation history strategy
-    // For non-OpenClaw: manage context window
+    // Determine backend for conversation history strategy.
+    // Non-OpenClaw models get managed history; OpenClaw manages its own session context.
     let managedHistory: { role: string; content: string }[] | undefined;
     const isOpenClaw = !model.startsWith("openai:") && !model.startsWith("anthropic:") && !model.startsWith("local:");
-
-    if (!isOpenClaw) {
-      // No context management needed — OpenClaw handles its own sessions
-    } else {
-      // This branch is dead (isOpenClaw is true) — managedHistory stays undefined
-    }
 
     if (!isOpenClaw && conversationHistory.length > 0) {
       const spec = resolveModel(model, routerConfig);
