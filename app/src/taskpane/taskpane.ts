@@ -1083,26 +1083,7 @@ async function handleCommand(command: string, params: any): Promise<any> {
       });
 
     case "replaceSelection":
-      return Word.run(async (ctx) => {
-        const { text } = params || {};
-        if (text === undefined) throw new Error("params.text required");
-        if (trackChangesMode) throw new Error("replaceSelection is disabled in Track mode. Use granular paragraph/phrase edits instead.");
-        const sel = ctx.document.getSelection();
-        sel.load("text");
-        const para = sel.paragraphs.getFirst();
-        para.load("style");
-        const paragraphs = ctx.document.body.paragraphs;
-        paragraphs.load("items");
-        await ctx.sync();
-        const original = sel.text;
-        let paraIndex = -1;
-        for (let i = 0; i < paragraphs.items.length; i++) { if (paragraphs.items[i] === para) { paraIndex = i; break; } }
-        const replacement = normalizeSmartQuotes(text);
-        sel.insertText(replacement, Word.InsertLocation.replace);
-        await ctx.sync();
-        pushUndo({ command: "replaceSelection", original, replacement, paragraphIndex: paraIndex, style: para.style, timestamp: Date.now() });
-        return { original, replacement, paragraphIndex: paraIndex, undoAvailable: true };
-      });
+      throw new Error("replaceSelection is disabled for safety. Use anchored edits (replaceParagraph/findReplace) to avoid selection drift.");
 
     case "replaceParagraph":
       return Word.run(async (ctx) => {
@@ -1195,27 +1176,7 @@ async function handleCommand(command: string, params: any): Promise<any> {
       });
 
     case "editSelection":
-      return Word.run(async (ctx) => {
-        const sel = ctx.document.getSelection();
-        sel.load("text,style,isEmpty");
-        const para = sel.paragraphs.getFirst();
-        para.load("style,isListItem");
-        const li = para.listItemOrNullObject;
-        li.load("listString");
-        await ctx.sync();
-
-        if (params?.replacement !== undefined) {
-          if (trackChangesMode) {
-            throw new Error("editSelection is disabled in Track mode. Use granular paragraph/phrase edits instead.");
-          }
-          const original = sel.text;
-          const replacement = normalizeSmartQuotes(params.replacement);
-          sel.insertText(replacement, Word.InsertLocation.replace);
-          await ctx.sync();
-          pushUndo({ command: "editSelection", original, replacement, style: sel.style, timestamp: Date.now() });
-        }
-        return { text: sel.text, style: sel.style, isEmpty: sel.isEmpty, listString: li.isNullObject ? undefined : li.listString, replaced: params?.replacement !== undefined };
-      });
+      throw new Error("editSelection is disabled for safety. Use anchored edits (replaceParagraph/findReplace) to avoid selection drift.");
 
     case "selectParagraph":
       return Word.run(async (ctx) => {
