@@ -195,6 +195,28 @@ function extractFirstJsonObject(text: string): any {
   return JSON.parse(m[0]);
 }
 
+function validateFilesystemEditPayload(parsed: any): { summary: string; python: string } {
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Invalid model payload: expected JSON object");
+  }
+
+  const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
+  const python = typeof parsed.python === "string" ? parsed.python.trim() : "";
+
+  if (!summary) throw new Error("Invalid model payload: missing summary");
+  if (!python) throw new Error("Invalid model payload: missing python script");
+
+  // Basic safety/shape checks to fail fast on garbage responses
+  if (!/docx|Document|python-docx|DOC_PATH|doc\.save/i.test(python)) {
+    throw new Error("Invalid model payload: python script does not look like a docx edit script");
+  }
+  if (python.length > 120000) {
+    throw new Error("Invalid model payload: python script too large");
+  }
+
+  return { summary, python };
+}
+
 async function runOpenClawFilesystemEdit(entry: PromptEntry, model: string, routerConfig: RouterConfig, ws: any): Promise<string> {
   const docPath = await getActiveWordDocPath();
   if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Reading document path…" }));
@@ -234,9 +256,9 @@ Requirements:
   }
 
   const parsed = extractFirstJsonObject(raw);
-  const python = (parsed?.python || "").toString();
-  const summary = (parsed?.summary || "Updated document.").toString();
-  if (!python.trim()) throw new Error("No python script returned");
+  const validated = validateFilesystemEditPayload(parsed);
+  const python = validated.python;
+  const summary = validated.summary;
 
   if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Applying filesystem edits…" }));
   const tmpPath = path.join("/tmp", `thesidebar-edit-${Date.now()}.py`);
