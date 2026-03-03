@@ -2857,25 +2857,7 @@ interface QuickActionCategory {
   actions: QuickAction[];
 }
 
-const QUICK_ACTIONS_DEFAULTS: QuickActionCategory[] = [
-  {
-    label: "⚡ Presets",
-    actions: [
-      { name: "Check Bluebook", prompt: "Review all citations in this document for Bluebook formatting errors. List each error with the paragraph number, the incorrect citation, and the corrected version." },
-      { name: "Long/Short Cites", prompt: "Check that every short citation in this document has a corresponding full citation earlier in the document. Flag any short cites that don't match a prior long cite, and any long cites that are repeated unnecessarily." },
-      { name: "TOA Pages", prompt: "__DIRECT_ACTION__checkToaPages" },
-      { name: "Find Uncited", prompt: "Identify any factual assertions in this document that lack a supporting citation or footnote." },
-      { name: "Defined Terms", prompt: "Check all defined terms in this document for consistency. Verify that each term is defined before first use, that definitions match usage, and that capitalization is consistent." },
-      { name: "House Style", prompt: "Review this document for common style issues: Oxford comma consistency, 'shall' vs 'will' vs 'must', passive voice, legalese that could be simplified, and inconsistent formatting." },
-      { name: "Cross-References", prompt: "Check all internal cross-references (e.g., 'See Section 3.2', 'as defined in Article IV') and verify they point to the correct sections." },
-      { name: "Clean Up", prompt: "Clean up formatting issues: remove double spaces, fix inconsistent paragraph spacing, normalize quotation marks (smart quotes), and fix any broken numbering." },
-      { name: "Summarize", prompt: "Provide a concise summary of this document, including: (1) the type of document, (2) the parties involved, (3) the key terms and obligations, and (4) any notable provisions or risks." },
-      { name: "Ambiguities", prompt: "Identify any ambiguous language in this document that could lead to disputes or multiple interpretations. For each instance, explain the ambiguity and suggest clearer language." },
-      { name: "Missing Definitions", prompt: "Find any terms in this document that are used as if they are defined terms (e.g., capitalized nouns) but lack a formal definition. List them with suggested definitions." },
-      { name: "Risk Analysis", prompt: "Analyze this document for potential legal risks, unfavorable terms, or provisions that may be problematic. Prioritize by severity." },
-    ]
-  },
-];
+const QUICK_ACTIONS_DEFAULTS: QuickActionCategory[] = [];
 
 function getBuiltinOverrides(): Record<string, string> {
   try { return JSON.parse(localStorage.getItem("sidebar-builtin-overrides") || "{}"); } catch { return {}; }
