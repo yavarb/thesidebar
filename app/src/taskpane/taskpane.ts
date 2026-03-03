@@ -1111,6 +1111,72 @@ async function handleCommand(command: string, params: any): Promise<any> {
         return { text: sel.text, style: sel.style, isEmpty: sel.isEmpty, paragraphStyle: para.style, listString: li.isNullObject ? undefined : li.listString };
       });
 
+    case "getSelectionAnchor":
+      return Word.run(async (ctx) => {
+        const sel = ctx.document.getSelection();
+        sel.load("text,isEmpty");
+        const para = sel.paragraphs.getFirstOrNullObject();
+        para.load("text,style,isListItem");
+        const li = para.listItemOrNullObject;
+        li.load("listString");
+
+        const paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        await ctx.sync();
+
+        if (sel.isEmpty || !sel.text) throw new Error("Select text to tighten first.");
+        if (para.isNullObject) throw new Error("Unable to resolve selected paragraph.");
+
+        let paragraphIndex = -1;
+        for (let i = 0; i < paragraphs.items.length; i++) {
+          if (paragraphs.items[i] === para) { paragraphIndex = i; break; }
+        }
+        if (paragraphIndex < 0) throw new Error("Unable to anchor selected paragraph.");
+
+        return {
+          selectedText: sel.text,
+          paragraphIndex,
+          paragraphText: para.text,
+          paragraphStyle: para.style,
+          listString: li.isNullObject ? undefined : li.listString,
+        };
+      });
+
+    case "applyParagraphEdits":
+      return Word.run(async (ctx) => {
+        const paragraphIndex = params?.paragraphIndex;
+        const edits: Array<{ find: string; replace: string }> = params?.edits || [];
+        if (paragraphIndex === undefined) throw new Error("paragraphIndex required");
+        if (!Array.isArray(edits) || edits.length === 0) throw new Error("No edits provided");
+
+        const paragraphs = ctx.document.body.paragraphs;
+        paragraphs.load("items");
+        await ctx.sync();
+        if (paragraphIndex < 0 || paragraphIndex >= paragraphs.items.length) throw new Error("paragraphIndex out of range");
+
+        const p = paragraphs.items[paragraphIndex];
+        p.load("text");
+        await ctx.sync();
+
+        let applied = 0;
+        for (const e of edits) {
+          const find = (e?.find || "").trim();
+          const replace = normalizeSmartQuotes((e?.replace || "").trim());
+          if (!find) continue;
+          const hits = p.search(find, { matchCase: true });
+          hits.load("items");
+          await ctx.sync();
+          if (hits.items.length === 0) continue;
+          hits.items[0].insertText(replace, Word.InsertLocation.replace);
+          await ctx.sync();
+          applied++;
+        }
+
+        p.load("text");
+        await ctx.sync();
+        return { applied, paragraphText: p.text };
+      });
+
     case "replaceSelection":
       throw new Error("replaceSelection is disabled for safety. Use anchored edits (replaceParagraph/findReplace) to avoid selection drift.");
 
@@ -2877,32 +2943,26 @@ function setupTrackChangesToggle(): void {
   });
 
   
-  // Tighten button — tightens selected text
-  const tightenBtn = document.getElementById("tighten-btn");
+  // Tighten button — deterministic flow via server endpoint (no free-form agent loop)
+  const tightenBtn = document.getElementById("tighten-btn") as HTMLButtonElement | null;
   tightenBtn?.addEventListener("click", async () => {
-    const prompt = `Tighten the selected text now. Do NOT ask follow-up questions.
-
-Rules:
-- Preserve meaning and tone.
-- Cut filler, redundancy, and throat-clearing.
-- Prefer active voice and tighter phrasing.
-- Keep formatting intact.
-- Use granular edits (phrase/sentence level), not full-selection replacement.
-- In Track mode, avoid broad paragraph rewrites.
-
-After making edits, respond with EXACTLY:
-**Tightened:** [one-sentence summary of what changed]
-**Saved:** [X] words ([Y]% reduction)
-
-Count words in original vs final to compute savings.`;
-    
-    const input = document.getElementById("prompt-input") as HTMLTextAreaElement;
-    if (input) {
-      input.value = prompt;
-      (input as any)._displayLabel = "✂️ Tighten selection";
-      (input as any)._forceModel = "openai:gpt-5.3-codex";
-      const sendBtn = document.getElementById("prompt-send") as HTMLButtonElement;
-      sendBtn?.click();
+    if (queryInProgress) return;
+    appendChatEntry("user", "✂️ Tighten selection");
+    addThinkingIndicator();
+    try {
+      const r = await fetch("http://localhost:3001/api/tighten-selection", { method: "POST" });
+      const j = await r.json();
+      removeThinkingIndicator();
+      if (!j?.ok) {
+        appendChatEntry("assistant", j?.error || "Tighten failed.");
+        return;
+      }
+      const data = j.data || {};
+      const msg = `**Tightened:** ${data.summary || "Applied targeted edits."}\n**Saved:** ${data.wordsSaved ?? 0} words (${data.percentSaved ?? 0}% reduction)`;
+      appendChatEntry("assistant", msg);
+    } catch (e: any) {
+      removeThinkingIndicator();
+      appendChatEntry("assistant", `Tighten failed: ${e?.message || "unknown error"}`);
     }
   });
 

@@ -738,6 +738,46 @@ function sendCommand(command: string, params?: any, timeoutMs = DEFAULT_TIMEOUT)
   });
 }
 
+async function generateTightenEdits(selectedText: string, model: string, routerConfig: RouterConfig): Promise<{ summary: string; edits: Array<{ find: string; replace: string }> }> {
+  const prompt = `You are rewriting text with surgical, phrase-level edits.
+
+Given SELECTED_TEXT below, produce JSON only with this shape:
+{
+  "summary": "one short sentence",
+  "edits": [
+    {"find": "exact substring from selected text", "replace": "tighter replacement"}
+  ]
+}
+
+Rules:
+- 1 to 8 edits max.
+- Each "find" must be an exact contiguous substring from SELECTED_TEXT.
+- Prefer short phrase replacements over full sentence rewrites.
+- Preserve legal meaning/tone.
+- Use smart quotes only.
+- No markdown, no commentary, JSON only.
+
+SELECTED_TEXT:
+"""
+${selectedText}
+"""`;
+
+  let raw = "";
+  for await (const chunk of routePrompt(prompt, model, { messages: [] }, routerConfig)) {
+    try {
+      const p = JSON.parse(chunk);
+      if (p?.type) continue;
+    } catch {}
+    raw += chunk;
+  }
+
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error("Model did not return JSON edits.");
+  const parsed = JSON.parse(match[0]);
+  const edits = Array.isArray(parsed?.edits) ? parsed.edits : [];
+  return { summary: parsed?.summary || "Tightened selected text.", edits };
+}
+
 // ── API Handler ──
 /**
  * Create an Express route handler that sends a command to the task pane.
@@ -877,6 +917,50 @@ app.post("/api/prompts/:id/respond", (req, res) => {
   }
 
   return res.json({ ok: true, data: { promptId: id, delivered } });
+});
+
+// Deterministic tighten flow: anchor selection -> generate phrase edits -> apply anchored edits.
+app.post("/api/tighten-selection", async (_req, res) => {
+  try {
+    const sel = await sendCommand("getSelectionAnchor", {}, 20000);
+    const selectedText = (sel?.selectedText || "").trim();
+    if (!selectedText) return res.status(400).json({ ok: false, error: "Select text to tighten first." });
+
+    const config = readConfig();
+    const model = "openai:gpt-5.3-codex";
+    const routerConfig: RouterConfig = {
+      openclawUrl: config.openclawUrl,
+      openclawToken: config.openclawToken,
+      openaiApiKey: config.openaiApiKey,
+      anthropicApiKey: config.anthropicApiKey,
+      localEndpoints: config.localEndpoints,
+    };
+
+    const generated = await generateTightenEdits(selectedText, model, routerConfig);
+    const edits = (generated.edits || []).filter((e) => e?.find && e?.replace && e.find !== e.replace).slice(0, 8);
+    if (edits.length === 0) {
+      return res.json({ ok: true, data: { summary: "No useful tighten edits found.", wordsSaved: 0, percentSaved: 0, applied: 0 } });
+    }
+
+    const applied = await sendCommand("applyParagraphEdits", { paragraphIndex: sel.paragraphIndex, edits }, 30000);
+    const beforeWords = selectedText.split(/\s+/).filter(Boolean).length;
+    const afterText = (applied?.paragraphText || "").toString();
+    const afterWords = afterText.split(/\s+/).filter(Boolean).length;
+    const wordsSaved = Math.max(0, beforeWords - afterWords);
+    const percentSaved = beforeWords > 0 ? Math.round((wordsSaved / beforeWords) * 100) : 0;
+
+    res.json({
+      ok: true,
+      data: {
+        summary: generated.summary,
+        applied: applied?.applied || 0,
+        wordsSaved,
+        percentSaved,
+      },
+    });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message || "Tighten failed" });
+  }
 });
 
 
