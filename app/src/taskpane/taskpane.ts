@@ -2942,32 +2942,60 @@ async function applyTrackChangesMode(desired: boolean): Promise<boolean> {
   }
 }
 
+async function readTrackChangesMode(): Promise<boolean | null> {
+  try {
+    return await Word.run(async (context) => {
+      context.document.load("changeTrackingMode");
+      await context.sync();
+      return context.document.changeTrackingMode === Word.ChangeTrackingMode.trackAll;
+    });
+  } catch {
+    return null;
+  }
+}
+
+function persistTrackMode(enabled: boolean): void {
+  if (enabled) localStorage.setItem("sidebar-track-changes", "true");
+  else localStorage.removeItem("sidebar-track-changes");
+  fetch("http://localhost:3001/api/settings/mode", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trackChanges: enabled }),
+  }).catch(() => {});
+}
+
 function setupTrackChangesToggle(): void {
   const modeToggle = document.getElementById("mode-toggle");
   if (!modeToggle) return;
+
+  let syncTimer: number | null = null;
+
+  const syncFromWord = async (silent = true) => {
+    const actual = await readTrackChangesMode();
+    if (actual === null) return;
+    if (actual !== trackChangesMode) {
+      trackChangesMode = actual;
+      setModeToggleVisual(modeToggle, trackChangesMode);
+      persistTrackMode(trackChangesMode);
+      if (!silent) {
+        appendChatEntry("assistant", trackChangesMode ? "Track Changes was enabled in Word — Sidebar synced to Track mode." : "Track Changes was disabled in Word — Sidebar synced to YOLO mode.");
+      }
+    }
+  };
 
   modeToggle.addEventListener("click", async () => {
     const desired = !trackChangesMode;
     const confirmed = await applyTrackChangesMode(desired);
 
-    trackChangesMode = confirmed ? desired : false;
-    setModeToggleVisual(modeToggle, trackChangesMode);
-
     if (!confirmed && desired) {
       appendChatEntry("assistant", "Track Changes could not be enabled via Word API on this setup. Please turn on Track Changes in Word manually, then try again.");
-      localStorage.removeItem("sidebar-track-changes");
+      await syncFromWord(true);
+      return;
     }
 
-    // Tell the server the confirmed state
-    fetch("http://localhost:3001/api/settings/mode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ trackChanges: trackChangesMode }),
-    }).catch(() => {});
-
-    // Persist preference
-    if (trackChangesMode) localStorage.setItem("sidebar-track-changes", "true");
-    else localStorage.removeItem("sidebar-track-changes");
+    await syncFromWord(true);
+    setModeToggleVisual(modeToggle, trackChangesMode);
+    persistTrackMode(trackChangesMode);
   });
 
   
@@ -2994,34 +3022,31 @@ function setupTrackChangesToggle(): void {
     }
   });
 
-  // Restore on load (verify Word accepted it before showing Track mode)
-  const savedMode = localStorage.getItem("sidebar-track-changes");
-  if (savedMode === "true") {
-    applyTrackChangesMode(true).then((confirmed) => {
-      trackChangesMode = confirmed;
-      setModeToggleVisual(modeToggle, trackChangesMode);
+  // Initial sync: Word is source of truth.
+  setModeToggleVisual(modeToggle, false);
+  syncFromWord(true).then(async () => {
+    const savedMode = localStorage.getItem("sidebar-track-changes");
+    if (savedMode === "true" && !trackChangesMode) {
+      // Apply saved preference only when Word currently differs.
+      const confirmed = await applyTrackChangesMode(true);
       if (!confirmed) {
-        localStorage.removeItem("sidebar-track-changes");
         appendChatEntry("assistant", "Track Changes preference was saved, but Word did not accept Track mode in this session. Using YOLO until Track Changes is enabled in Word.");
       }
-      fetch("http://localhost:3001/api/settings/mode", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trackChanges: trackChangesMode }),
-      }).catch(() => {});
-    });
-  } else {
-    setModeToggleVisual(modeToggle, false);
-  }
-
-  // Restore original state when leaving
-  window.addEventListener("beforeunload", () => {
-    if (trackChangesMode) {
-      Word.run(async (context) => {
-        context.document.changeTrackingMode = Word.ChangeTrackingMode.off;
-        await context.sync();
-      }).catch(() => {});
+      await syncFromWord(true);
     }
+    setModeToggleVisual(modeToggle, trackChangesMode);
+    persistTrackMode(trackChangesMode);
+  });
+
+  // Continuous two-way sync: if user toggles Track Changes in Word ribbon, reflect it here.
+  syncTimer = window.setInterval(() => { void syncFromWord(true); }, 1500);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) void syncFromWord(true);
+  });
+  window.addEventListener("focus", () => { void syncFromWord(true); });
+
+  window.addEventListener("beforeunload", () => {
+    if (syncTimer !== null) window.clearInterval(syncTimer);
   });
 }
 
