@@ -218,6 +218,19 @@ function validateFilesystemEditPayload(parsed: any): { summary: string; python: 
 }
 
 async function runOpenClawFilesystemEdit(entry: PromptEntry, model: string, routerConfig: RouterConfig, ws: any): Promise<string> {
+  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Capturing context…" }));
+
+  // Best-effort context capture before file rewrite/reload.
+  let restoreIndex: number | undefined;
+  try {
+    const sel = await sendCommand("getSelection", {}, 8000);
+    if (typeof sel?.listString === "string" && sel.listString.trim()) {
+      const all = await sendCommand("getParagraphs", { from: 0, to: 2000, compact: true }, 15000);
+      const hit = (all?.paragraphs || []).find((p: any) => p?.listString === sel.listString);
+      if (hit && typeof hit.index === "number") restoreIndex = hit.index;
+    }
+  } catch {}
+
   const docPath = await getActiveWordDocPath();
   if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Reading document path…" }));
 
@@ -278,6 +291,15 @@ Requirements:
   if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Reloading Word document…" }));
   const { execSync } = require("child_process");
   execSync(`osascript -e 'tell application "Microsoft Word" to close active document saving no' -e 'delay 0.3' -e 'tell application "Microsoft Word" to open "${docPath}"' -e 'tell application "Microsoft Word" to activate'`, { encoding: "utf-8", timeout: 15000 });
+
+  // Best-effort context restoration after reload.
+  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Restoring context…" }));
+  if (typeof restoreIndex === "number") {
+    try {
+      await new Promise(r => setTimeout(r, 1200));
+      await sendCommand("selectParagraph", { index: restoreIndex }, 10000);
+    } catch {}
+  }
 
   return summary;
 }
