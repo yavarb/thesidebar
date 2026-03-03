@@ -1266,6 +1266,9 @@ async function handleCommand(command: string, params: any): Promise<any> {
       return Word.run(async (ctx) => {
         const { text, replacement, matchCase, matchWholeWord } = params || {};
         if (!text || replacement === undefined) throw new Error("text and replacement required");
+        if (trackChangesMode && (text.length > 160 || text.includes("\n"))) {
+          throw new Error("Track mode blocks broad find/replace. Use smaller phrase-level replacements.");
+        }
         const normalizedReplacement = normalizeSmartQuotes(replacement);
         const results = ctx.document.body.search(text, { matchCase: matchCase ?? false, matchWholeWord: matchWholeWord ?? false });
         results.load("items"); await ctx.sync();
@@ -1319,6 +1322,9 @@ async function handleCommand(command: string, params: any): Promise<any> {
       return Word.run(async (ctx) => {
         const { index, text, style } = params || {};
         if (index === undefined) throw new Error("params.index required");
+        if (trackChangesMode && text !== undefined) {
+          throw new Error("updateParagraph text replacement is disabled in Track mode. Use granular edits.");
+        }
         const paragraphs = ctx.document.body.paragraphs; paragraphs.load("items"); await ctx.sync();
         if (index < 0 || index >= paragraphs.items.length) throw new Error(`index out of range`);
         const p = paragraphs.items[index];
