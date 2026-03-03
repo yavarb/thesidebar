@@ -196,6 +196,23 @@ function extractFirstJsonObject(text: string): any {
   return JSON.parse(m[0]);
 }
 
+async function getFilesystemEditPayloadWithRetry(raw: string, model: string, routerConfig: RouterConfig): Promise<any> {
+  try {
+    return extractFirstJsonObject(raw);
+  } catch {
+    const repairPrompt = `Convert the following assistant output into strict JSON only with keys summary, changes, python. Do not add markdown.\n\n${raw}`;
+    let repaired = "";
+    for await (const chunk of routePrompt(repairPrompt, model, { messages: [] }, routerConfig)) {
+      try {
+        const p = JSON.parse(chunk);
+        if (p?.type) continue;
+      } catch {}
+      repaired += chunk;
+    }
+    return extractFirstJsonObject(repaired);
+  }
+}
+
 function validateFilesystemEditPayload(parsed: any): { summary: string; python: string } {
   if (!parsed || typeof parsed !== "object") {
     throw new Error("Invalid model payload: expected JSON object");
@@ -271,7 +288,7 @@ Requirements:
     }
   }
 
-  const parsed = extractFirstJsonObject(raw);
+  const parsed = await getFilesystemEditPayloadWithRetry(raw, model, routerConfig);
   const validated = validateFilesystemEditPayload(parsed);
   const python = validated.python;
   const summary = validated.summary;
@@ -755,8 +772,13 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
     if (currentAbortController === abortController) currentAbortController = null;
 
     // Send final response
+    const safeResponse = (fullResponse || "").trim()
+      ? fullResponse
+      : (isOpenClaw
+          ? "No response generated for this OpenClaw request. Please retry; if this repeats, switch modes and try again."
+          : "No response generated. Please retry.");
     if (ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: fullResponse || "(No response)", timestamp: Date.now(), hasChanges, exchangeId: currentExchangeId, changeSummaries: changeSummaries.length > 0 ? changeSummaries : undefined }));
+      ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: safeResponse, timestamp: Date.now(), hasChanges, exchangeId: currentExchangeId, changeSummaries: changeSummaries.length > 0 ? changeSummaries : undefined }));
     }
   } catch (e: any) {
     console.error("[agent] Error processing prompt:", e.message);
