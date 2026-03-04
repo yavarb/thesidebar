@@ -41,7 +41,7 @@ Microsoft Copilot costs $30/month, locks you into one model, and can't even add 
 - **Model-agnostic** — OpenAI, Anthropic, OpenClaw, Ollama, LM Studio, or any OpenAI-compatible API
 - **OpenClaw integration** — connect your OpenClaw agent directly to Word with async streaming and full document tool access
 - **BYOK (Bring Your Own Keys)** — your credentials, your choice of provider, your data
-- **Agentic loop** — AI plans and executes multi-step document edits autonomously
+- **Agentic loop** — AI plans and executes multi-step document edits autonomously (proper structured tool messages for OpenAI and Anthropic tool-calling formats)
 - **Token-by-token streaming** — see responses as they generate, with live tool execution ticker
 - **Smart context management** — dynamic context window detection per model, configurable budget (default 40%)
 - **Prompt caching** — Anthropic `cache_control` + OpenAI-optimized message ordering for up to 90% input cost reduction
@@ -62,7 +62,7 @@ Microsoft Copilot costs $30/month, locks you into one model, and can't even add 
 
 ### ⚡ Quick Actions
 - **One-click legal tools** — Cite Check, Long/Short Cites, TOA Pages, Defined Terms, House Style, Risk Analysis, and more
-- **✂️ Tighten** — select text, click once, AI rewrites it tighter without losing substance
+- **✂️ Tighten** — select text, click once, AI rewrites it tighter without losing substance. Preserves footnotes and formatting. In Track mode, applies targeted phrase-level edits for clean redlines; in YOLO mode, does a full paragraph replace
 - **Editable prompts** — customize any built-in action, save your own custom prompts with `{{selection}}` and `{{document}}` variables
 - **TOA Page Checker** — exports to PDF for real pagination, uses LLM intelligence for citation variant matching
 
@@ -78,12 +78,13 @@ Microsoft Copilot costs $30/month, locks you into one model, and can't even add 
 - **Session restoration** — auto-generated recap on resume, full history search
 - **Revert system** — per-exchange undo, one click to roll back
 - **Inline mini-diffs** — every edit shows a compact before/after summary
-- **Stop button** — cancel in-flight requests instantly
-- **Async OpenClaw mode** — long-running agent tasks stream results progressively instead of blocking
-- **Elapsed timer** — see how long the model has been thinking
+- **Stop button** — cancel in-flight requests instantly, with real abort signal propagation that kills the underlying HTTP request
+- **Async OpenClaw mode** — long-running agent tasks stream results progressively instead of blocking, with no timeout (runs until done or stopped)
+- **Elapsed timer** — see how long the model has been thinking, with ⌛ progress counter for OpenClaw
+- **Completion indicator** — red ■ Done badge on every response so you know when the AI has finished
 
 ### ✏️ Editing Experience
-- **Track Changes / YOLO mode** — toggle between tracked changes and direct edits
+- **Track Changes / YOLO mode** — toggle between tracked changes and direct edits, synced with Word's actual state
 - **Live streaming** — typewriter cursor, tool execution ticker with spinners
 - **Smooth auto-scroll** — `requestAnimationFrame` throttled
 - **Pre-warm on connect** — document indexed before first prompt
