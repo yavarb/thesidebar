@@ -79,6 +79,8 @@ export interface PromptContext {
   tools?: any[];
   /** Session user ID for OpenClaw context persistence */
   sessionUser?: string;
+  /** Abort signal — when triggered, in-flight HTTP requests are destroyed */
+  signal?: AbortSignal;
 }
 
 /** Cache statistics for prompt caching */
@@ -106,10 +108,11 @@ export const cacheStats: CacheStats = {
  */
 export function httpRequest(
   url: string,
-  options: { method: string; headers: Record<string, string>; timeoutMs?: number },
+  options: { method: string; headers: Record<string, string>; timeoutMs?: number; signal?: AbortSignal },
   body?: any
 ): Promise<http.IncomingMessage> {
   return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) return reject(new Error("Aborted"));
     const parsed = new URL(url);
     const mod = parsed.protocol === "https:" ? https : http;
     const req = mod.request(url, {
@@ -118,9 +121,17 @@ export function httpRequest(
       rejectUnauthorized: false,
     }, (res) => resolve(res));
     req.on("error", reject);
-    req.setTimeout(options.timeoutMs ?? 300000, () => {
-      req.destroy(new Error(`Request timeout after ${options.timeoutMs ?? 300000}ms: ${url}`));
-    });
+    const timeout = options.timeoutMs ?? 0;
+    if (timeout > 0) {
+      req.setTimeout(timeout, () => {
+        req.destroy(new Error(`Request timeout after ${timeout}ms: ${url}`));
+      });
+    }
+    if (options.signal) {
+      const onAbort = () => req.destroy(new Error("Aborted"));
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      req.on("close", () => options.signal!.removeEventListener("abort", onAbort));
+    }
     if (body !== undefined) {
       req.write(typeof body === "string" ? body : JSON.stringify(body));
     }
@@ -221,7 +232,7 @@ export async function* routeOpenClaw(
   }
 
   const url = baseUrl.replace(/\/$/, "") + "/v1/chat/completions";
-  const res = await httpRequest(url, { method: "POST", headers }, body);
+  const res = await httpRequest(url, { method: "POST", headers, signal: context.signal }, body);
 
   let raw = "";
   for await (const chunk of res) raw += chunk.toString();
@@ -284,6 +295,7 @@ export async function* routeOpenAI(
   const res = await httpRequest("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.openaiApiKey}` },
+    signal: context.signal,
   }, body);
 
   if (res.statusCode && res.statusCode >= 400) {
@@ -389,6 +401,7 @@ export async function* routeAnthropic(
       "x-api-key": config.anthropicApiKey,
       "anthropic-version": "2023-06-01",
     },
+    signal: context.signal,
   }, body);
 
   if (res.statusCode && res.statusCode >= 400) {
@@ -489,6 +502,7 @@ export async function* routeLocal(
   const res = await httpRequest(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal: context.signal,
   }, body);
 
   let raw = "";
@@ -602,6 +616,7 @@ export async function* routeResponses(
       "Content-Type": "application/json",
       "Authorization": `Bearer ${key}`,
     },
+    signal: context.signal,
   }, body);
 
   let raw = "";

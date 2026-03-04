@@ -431,7 +431,15 @@ function setupPromptUI() {
   const sendPrompt = async () => {
     const text = input.value.trim();
     if (!text || !socket || socket.readyState !== WebSocket.OPEN) return;
-    
+
+    // Intercept tighten-like prompts and redirect to the deterministic tighten endpoint
+    const lower = text.toLowerCase();
+    if (/^(tighten|trim|shorten|cut\s*(the\s*)?fat)\b/.test(lower)) {
+      input.value = "";
+      tightenBtn?.click();
+      return;
+    }
+
     // Get current selection + stable anchor metadata for context
     let context = "";
     try {
@@ -893,6 +901,12 @@ function connectWebSocket() {
               summaryDiv.appendChild(linesDiv);
               el.appendChild(summaryDiv);
             }
+            // Add completion indicator
+            const doneEl = document.createElement("div");
+            doneEl.className = "completion-indicator";
+            doneEl.innerHTML = '<span class="done-dot">■</span> Done';
+            el.appendChild(doneEl);
+
             userEl.insertAdjacentElement("afterend", el);
             inserted = true;
           }
@@ -1149,15 +1163,29 @@ async function handleCommand(command: string, params: any): Promise<any> {
         li.load("listString");
 
         const paragraphs = ctx.document.body.paragraphs;
-        paragraphs.load("items");
+        paragraphs.load("items/text");
         await ctx.sync();
 
         if (sel.isEmpty || !sel.text) throw new Error("Select text to tighten first.");
         if (para.isNullObject) throw new Error("Unable to resolve selected paragraph.");
 
+        // Find paragraph index — proxy identity (===) doesn't work across collections,
+        // so compare by range location in a single batch sync.
         let paragraphIndex = -1;
-        for (let i = 0; i < paragraphs.items.length; i++) {
-          if (paragraphs.items[i] === para) { paragraphIndex = i; break; }
+        const comparisons = paragraphs.items.map(p => para.getRange().compareLocationWith(p.getRange()));
+        await ctx.sync();
+        for (let i = 0; i < comparisons.length; i++) {
+          const v = comparisons[i].value;
+          if (v === "Equal" || v === "Contains" || v === "Inside") {
+            paragraphIndex = i;
+            break;
+          }
+        }
+        // Fallback: match by text content
+        if (paragraphIndex < 0 && para.text) {
+          for (let i = 0; i < paragraphs.items.length; i++) {
+            if (paragraphs.items[i].text === para.text) { paragraphIndex = i; break; }
+          }
         }
         if (paragraphIndex < 0) throw new Error("Unable to anchor selected paragraph.");
 
@@ -1248,15 +1276,6 @@ async function handleCommand(command: string, params: any): Promise<any> {
         const oldMiddle = original.substring(prefixLen, original.length - suffixLen);
         const newMiddle = desired.substring(prefixLen, desired.length - suffixLen);
         const trackMode = !!trackChangesMode;
-
-        // Strict tracked-edit guardrail: block broad rewrites in Track mode.
-        const changedChars = oldMiddle.length;
-        const totalChars = Math.max(1, original.length);
-        const changedRatio = changedChars / totalChars;
-        const isBroadRewrite = changedChars === totalChars || changedRatio > 0.6;
-        if (trackMode && isBroadRewrite) {
-          throw new Error("Track mode blocks broad paragraph rewrites. Please apply smaller sentence/phrase edits.");
-        }
 
         if (oldMiddle.length > 0 && oldMiddle.length < original.length) {
           // Best case: patch only the changed span.

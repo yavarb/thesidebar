@@ -87,8 +87,9 @@ export interface AgentLoopOptions {
   /** Session user ID for OpenClaw context persistence */
   sessionUser?: string;
   /** Conversation history for non-OpenClaw models */
-
   conversationHistory?: { role: string; content: string }[];
+  /** Abort signal — when triggered, the loop stops after the current iteration */
+  signal?: AbortSignal;
 }
 
 /** Result of the agent loop including change summaries */
@@ -294,6 +295,7 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
     tools: TOOL_DEFINITIONS,
     messages,
     sessionUser,
+    signal: options.signal,
   };
 
   let currentPrompt = prompt;
@@ -301,6 +303,7 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
   const changeSummaries: string[] = [];
 
   while (iteration < maxIterations) {
+    if (options.signal?.aborted) return;
     iteration++;
 
     // Stream text chunks immediately while collecting tool calls

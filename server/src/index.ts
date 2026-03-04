@@ -273,7 +273,7 @@ function validateFilesystemEditPayload(parsed: any): { summary: string; python: 
   return { summary, python };
 }
 
-async function runOpenClawFilesystemEdit(entry: PromptEntry, model: string, routerConfig: RouterConfig, ws: any): Promise<string> {
+async function runOpenClawFilesystemEdit(entry: PromptEntry, model: string, routerConfig: RouterConfig, ws: any, signal?: AbortSignal): Promise<string> {
   if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Capturing context…" }));
 
   // Best-effort context capture before file rewrite/reload.
@@ -315,7 +315,7 @@ Requirements:
   if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Planning edit script…" }));
 
   let raw = "";
-  for await (const chunk of routePrompt(ocPrompt, model, { messages: [], sessionUser: "thesidebar:" + sessionId }, routerConfig)) {
+  for await (const chunk of routePrompt(ocPrompt, model, { messages: [], sessionUser: "thesidebar:" + sessionId, signal }, routerConfig)) {
     try {
       const p = JSON.parse(chunk);
       if (p?.type) continue;
@@ -327,12 +327,14 @@ Requirements:
     }
   }
 
+  if (signal?.aborted) throw new Error("Aborted");
   const parsed = await getFilesystemEditPayloadWithRetry(raw, model, routerConfig);
   const validated = validateFilesystemEditPayload(parsed);
   const python = validated.python;
   const summary = validated.summary;
   const modelChanges = Array.isArray(parsed?.changes) ? parsed.changes.slice(0, 20).map((x: any) => String(x)) : [];
 
+  if (signal?.aborted) throw new Error("Aborted");
   if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Applying filesystem edits…" }));
   const tmpPath = path.join("/tmp", `thesidebar-edit-${Date.now()}.py`);
   fs.writeFileSync(tmpPath, python, "utf-8");
@@ -676,16 +678,9 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
     const chosen = isOpenClaw ? chooseOpenClawEditApproach(entry.text || fullPrompt, trackModeOn) : null;
 
     if (isOpenClaw && chosen?.approach === "filesystem") {
-      if (ws.readyState === 1) {
-        ws.send(JSON.stringify({
-          type: "prompt_progress",
-          promptId: entry.id,
-          text: `Mode: YOLO (filesystem edit path) — ${chosen.reason} [fs:${chosen.scoreFilesystem} live:${chosen.scoreLive}]`,
-        }));
-      }
       conversationHistory.push({ role: "user", content: fullPrompt, timestamp: Date.now() });
       try {
-        const summary = await runOpenClawFilesystemEdit(entry, model, routerConfig, ws);
+        const summary = await runOpenClawFilesystemEdit(entry, model, routerConfig, ws, abortController.signal);
         fullResponse = summary || "Updated document via filesystem edit + reload.";
       } catch (e: any) {
         fullResponse = `OpenClaw filesystem edit failed: ${e?.message || "unknown error"}`;
@@ -693,13 +688,18 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)", timestamp: Date.now() });
 
     } else {
-      if (isOpenClaw && ws.readyState === 1) {
-        ws.send(JSON.stringify({
-          type: "prompt_progress",
-          promptId: entry.id,
-          text: `Mode: ${trackModeOn ? "Track" : "YOLO"} (live in-Word edit path) — ${chosen?.reason || "default"} [fs:${chosen?.scoreFilesystem ?? 0} live:${chosen?.scoreLive ?? 0}]`,
-        }));
-      }
+
+    // Show elapsed-time progress for OpenClaw (non-streaming, can take minutes)
+    let ocProgressInterval: ReturnType<typeof setInterval> | null = null;
+    if (isOpenClaw) {
+      const ocStart = Date.now();
+      ocProgressInterval = setInterval(() => {
+        if (ws.readyState === 1 && !fullResponse) {
+          const elapsed = Math.round((Date.now() - ocStart) / 1000);
+          ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: `⌛ Working… (${elapsed}s)` }));
+        }
+      }, 3000);
+    }
 
     for await (const chunk of runAgentLoop({
       prompt: fullPrompt,
@@ -709,6 +709,7 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       systemPrompt: systemPromptOverride,
       sessionUser: "thesidebar:" + sessionId,
       conversationHistory: managedHistory,
+      signal: abortController.signal,
       onToolCall: (call) => {
         if (MODIFYING_TOOLS.has(call.name)) {
           modifyingCallCount++;
@@ -755,6 +756,8 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
         ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: fullResponse }));
       }
     }
+
+    if (ocProgressInterval) clearInterval(ocProgressInterval);
 
     // Track conversation history for non-OpenClaw models
     conversationHistory.push({ role: "user", content: fullPrompt, timestamp: Date.now() });
@@ -954,6 +957,8 @@ Rules:
 - Each "find" must be an exact contiguous substring from SELECTED_TEXT.
 - Prefer short phrase replacements over full sentence rewrites.
 - Preserve legal meaning/tone.
+- Preserve all footnotes — never remove footnote reference numbers or their surrounding text. If a phrase contains a footnote marker, keep it in the replacement.
+- Preserve formatting — do not strip bold, italic, or other inline markup.
 - Use smart quotes only.
 - No markdown, no commentary, JSON only.
 
@@ -1142,7 +1147,25 @@ app.post("/api/tighten-selection", async (_req, res) => {
       return res.json({ ok: true, data: { summary: "No useful tighten edits found.", wordsSaved: 0, percentSaved: 0, applied: 0 } });
     }
 
-    const applied = await sendCommand("applyParagraphEdits", { paragraphIndex: sel.paragraphIndex, edits }, 30000);
+    // Estimate how much of the selected text is being changed
+    const totalFindChars = edits.reduce((sum, e) => sum + e.find.length, 0);
+    const changeRatio = selectedText.length > 0 ? totalFindChars / selectedText.length : 0;
+    const trackMode = isTrackChangesEnabled();
+
+    let applied: any;
+    if (trackMode && changeRatio < 0.6) {
+      // Track mode with <60% change: targeted find/replace for clean track changes marks
+      applied = await sendCommand("applyParagraphEdits", { paragraphIndex: sel.paragraphIndex, edits }, 30000);
+    } else {
+      // YOLO mode or ≥60% change: compute final text and do a single paragraph replace
+      let finalText = selectedText;
+      for (const e of edits) {
+        finalText = finalText.replace(e.find, e.replace);
+      }
+      applied = await sendCommand("replaceParagraph", { index: sel.paragraphIndex, text: finalText }, 30000);
+      applied = { applied: edits.length, paragraphText: finalText };
+    }
+
     const beforeWords = selectedText.split(/\s+/).filter(Boolean).length;
     const afterText = (applied?.paragraphText || "").toString();
     const afterWords = afterText.split(/\s+/).filter(Boolean).length;
