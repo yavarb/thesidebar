@@ -16,7 +16,7 @@ import http from "http";
 import https from "https";
 import { URL } from "url";
 import { TOOL_DEFINITIONS, TOOL_ENDPOINTS, ToolEndpoint } from "./tools";
-import { routePrompt, RouterConfig, PromptContext, httpRequest } from "./llm-router";
+import { routePrompt, RouterConfig, PromptContext, ConversationMessage, httpRequest } from "./llm-router";
 import { isTrackChangesEnabled } from "./track-changes";
 
 /** Maximum number of tool-calling iterations to prevent infinite loops */
@@ -249,97 +249,6 @@ export async function executeTool(call: ToolCall, serverUrl: string): Promise<To
   }
 }
 
-// ── Response Parsing ──
-
-/**
- * Collect a full non-streaming response from an LLM via the router.
- * Accumulates all streamed chunks and parses tool calls from structured outputs.
- *
- * For OpenAI-format responses, tool calls come as JSON chunks with type:"tool_calls".
- * For Anthropic-format, they come as tool_use_start + tool_input_delta + tool_use_complete.
- */
-export async function collectLLMResponse(
-  prompt: string,
-  model: string,
-  context: PromptContext,
-  config: RouterConfig
-): Promise<{ text: string; toolCalls: ToolCall[] }> {
-  let text = "";
-  const toolCalls: ToolCall[] = [];
-
-  // For OpenAI tool call accumulation
-  const openaiToolAccum: Map<number, { id: string; name: string; args: string }> = new Map();
-
-  // For Anthropic tool call accumulation
-  let anthropicCurrentTool: { id: string; name: string; argsJson: string } | null = null;
-
-  for await (const chunk of routePrompt(prompt, model, context, config)) {
-    // Try to parse as structured event
-    try {
-      const parsed = JSON.parse(chunk);
-
-      // OpenAI format: tool_calls delta
-      if (parsed.type === "tool_calls" && Array.isArray(parsed.delta)) {
-        for (const tc of parsed.delta) {
-          const idx = tc.index ?? 0;
-          if (!openaiToolAccum.has(idx)) {
-            openaiToolAccum.set(idx, { id: tc.id || "", name: tc.function?.name || "", args: "" });
-          }
-          const accum = openaiToolAccum.get(idx)!;
-          if (tc.id) accum.id = tc.id;
-          if (tc.function?.name) accum.name = tc.function.name;
-          if (tc.function?.arguments) accum.args += tc.function.arguments;
-        }
-        continue;
-      }
-
-      // Anthropic format: tool_use_start
-      if (parsed.type === "tool_use_start") {
-        anthropicCurrentTool = { id: parsed.id, name: parsed.name, argsJson: "" };
-        continue;
-      }
-
-      // Anthropic format: tool_input_delta
-      if (parsed.type === "tool_input_delta") {
-        if (anthropicCurrentTool) {
-          anthropicCurrentTool.argsJson += parsed.delta;
-        }
-        continue;
-      }
-
-      // Anthropic format: tool_use_complete
-      if (parsed.type === "tool_use_complete") {
-        if (anthropicCurrentTool) {
-          let args: Record<string, any> = {};
-          try { args = JSON.parse(anthropicCurrentTool.argsJson); } catch {}
-          toolCalls.push({ id: anthropicCurrentTool.id, name: anthropicCurrentTool.name, arguments: args });
-          anthropicCurrentTool = null;
-        }
-        continue;
-      }
-
-      // OpenClaw queued response — not a tool call scenario
-      if (parsed.type === "openclaw_queued") {
-        text = chunk;
-        continue;
-      }
-    } catch {
-      // Not JSON — it's plain text content
-    }
-
-    text += chunk;
-  }
-
-  // Finalize any accumulated OpenAI tool calls
-  for (const [, accum] of openaiToolAccum) {
-    let args: Record<string, any> = {};
-    try { args = JSON.parse(accum.args); } catch {}
-    toolCalls.push({ id: accum.id, name: accum.name, arguments: args });
-  }
-
-  return { text, toolCalls };
-}
-
 // ── Agentic Loop ──
 
 /**
@@ -368,7 +277,7 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
   } = options;
 
   // Build conversation history for multi-turn
-  const messages: Array<{ role: "user" | "assistant" | "system"; content: string }> = [];
+  const messages: ConversationMessage[] = [];
 
   // Prepend prior conversation history if provided (for non-OpenClaw models)
   if (priorHistory?.length) {
@@ -468,8 +377,22 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
     // Signal that tools are about to execute (UI should keep "working" indicator)
     yield "\n__TOOL_PHASE__" + JSON.stringify({ toolCount: toolCalls.length, tools: toolCalls.map(tc => tc.name) });
 
-    // Add assistant's tool call response to history
-    messages.push({ role: "assistant", content: fullText || `[Tool calls: ${toolCalls.map(tc => tc.name).join(", ")}]` });
+    // Record the user prompt that triggered these tool calls.
+    // routePrompt received it as a separate param, not in messages[].
+    if (currentPrompt) {
+      messages.push({ role: "user", content: currentPrompt });
+    }
+
+    // Add assistant's response with structured tool_calls to history
+    messages.push({
+      role: "assistant",
+      content: fullText || "",
+      tool_calls: toolCalls.map(tc => ({
+        id: tc.id,
+        type: "function" as const,
+        function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+      })),
+    });
 
     // Execute tool calls — batch when possible, navigate before edits
     const results: ToolResult[] = [];
@@ -579,21 +502,18 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
       }
     }
 
-    // Format tool results as the next message
-    const toolResultText = results
-      .map((r) => {
-        const resultStr = r.error
-          ? `Error: ${r.error}`
-          : JSON.stringify(r.result, null, 2);
-        return `Tool "${r.name}" (${r.toolCallId}):\n${resultStr}`;
-      })
-      .join("\n\n");
+    // Add individual tool result messages (proper format for OpenAI/Anthropic)
+    for (const r of results) {
+      messages.push({
+        role: "tool",
+        tool_call_id: r.toolCallId,
+        content: r.error ? `Error: ${r.error}` : JSON.stringify(r.result),
+      });
+    }
 
-    messages.push({ role: "user", content: `Tool results:\n\n${toolResultText}` });
-
-    // Continue the loop — the LLM will see the tool results and either
-    // make more tool calls or return a final response
-    currentPrompt = "Based on the tool results above, continue with your task. If you need more information, use the tools. If you have enough information, provide your final response.";
+    // Continue the loop with no additional user message — the model
+    // naturally continues after seeing tool results
+    currentPrompt = "";
   }
 
   // Max iterations reached

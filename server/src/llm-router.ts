@@ -50,14 +50,31 @@ export interface ModelSpec {
   baseUrl?: string;
 }
 
+/** A tool call on an assistant message (OpenAI function-calling format) */
+export interface MessageToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+/** A message in the conversation history, supporting tool-calling turns */
+export interface ConversationMessage {
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  /** Present on assistant messages that invoke tools */
+  tool_calls?: MessageToolCall[];
+  /** Present on tool-result messages (role: "tool") */
+  tool_call_id?: string;
+}
+
 /** Context sent with the prompt */
 export interface PromptContext {
   /** System prompt / instructions */
   systemPrompt?: string;
   /** Document context (e.g., current document text) */
   documentContext?: string;
-  /** Conversation history */
-  messages?: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+  /** Conversation history (supports structured tool messages) */
+  messages?: ConversationMessage[];
   /** Tool definitions (OpenAI function-calling format) */
   tools?: any[];
   /** Session user ID for OpenClaw context persistence */
@@ -138,10 +155,6 @@ export function parseSSELines(buffer: string): { events: string[]; remainder: st
 
 interface LLMExtract { text: string; reasoning?: string; }
 
-function extractAssistantTextFromChatCompletion(parsed: any): string {
-  return extractLLMResponse(parsed).text;
-}
-
 function extractLLMResponse(parsed: any): LLMExtract {
   const message = parsed?.choices?.[0]?.message;
   const content = message?.content;
@@ -197,7 +210,7 @@ export async function* routeOpenClaw(
   if (context.messages) messages.push(...context.messages);
   messages.push({ role: "user", content: prompt });
 
-  const body: any = { model, messages, stream: true };
+  const body: any = { model, messages, stream: false };
   if (context.sessionUser) body.user = context.sessionUser;
   if (context.tools?.length) body.tools = context.tools;
 
@@ -210,27 +223,29 @@ export async function* routeOpenClaw(
   const url = baseUrl.replace(/\/$/, "") + "/v1/chat/completions";
   const res = await httpRequest(url, { method: "POST", headers }, body);
 
+  let raw = "";
+  for await (const chunk of res) raw += chunk.toString();
+
   if (res.statusCode && res.statusCode >= 400) {
-    let errBody = "";
-    for await (const chunk of res) errBody += chunk.toString();
-    throw new Error(`OpenClaw API error ${res.statusCode}: ${errBody.slice(0, 500)}`);
+    throw new Error(`OpenClaw API error ${res.statusCode}: ${raw.slice(0, 500)}`);
   }
 
-  // Stream SSE — same delta format as OpenAI chat completions
-  let buffer = "";
-  for await (const chunk of res) {
-    buffer += chunk.toString();
-    const { events, remainder } = parseSSELines(buffer);
-    buffer = remainder;
-    for (const event of events) {
-      try {
-        const parsed = JSON.parse(event);
-        const delta = parsed.choices?.[0]?.delta;
-        if (delta?.content) {
-          yield delta.content;
-        }
-      } catch {}
+  // Parse the JSON response and extract text content
+  try {
+    const parsed = JSON.parse(raw);
+    const content = parsed?.choices?.[0]?.message?.content;
+    if (typeof content === "string" && content) {
+      yield content;
+    } else if (Array.isArray(content)) {
+      const joined = content
+        .map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+        .filter(Boolean)
+        .join("\n");
+      if (joined) yield joined;
     }
+  } catch {
+    // If not JSON, yield raw response
+    if (raw.trim()) yield raw.trim();
   }
 }
 
@@ -247,11 +262,21 @@ export async function* routeOpenAI(
 ): AsyncGenerator<string> {
   if (!config.openaiApiKey) throw new Error("OpenAI API key not configured");
 
-  const messages: Array<{ role: string; content: string }> = [];
+  const messages: Array<any> = [];
   if (context.systemPrompt) messages.push({ role: "system", content: context.systemPrompt });
   if (context.documentContext) messages.push({ role: "system", content: `Current document context:\n${context.documentContext}` });
-  if (context.messages) messages.push(...context.messages);
-  messages.push({ role: "user", content: prompt });
+  if (context.messages) {
+    for (const m of context.messages) {
+      if (m.role === "tool") {
+        messages.push({ role: "tool", tool_call_id: m.tool_call_id, content: m.content });
+      } else if (m.role === "assistant" && m.tool_calls?.length) {
+        messages.push({ role: "assistant", content: m.content || null, tool_calls: m.tool_calls });
+      } else {
+        messages.push({ role: m.role, content: m.content });
+      }
+    }
+  }
+  if (prompt) messages.push({ role: "user", content: prompt });
 
   const body: any = { model, messages, stream: true, stream_options: { include_usage: true } };
   if (context.tools?.length) body.tools = context.tools;
@@ -306,14 +331,36 @@ export async function* routeAnthropic(
 ): AsyncGenerator<string> {
   if (!config.anthropicApiKey) throw new Error("Anthropic API key not configured");
 
-  const messages: Array<{ role: string; content: string }> = [];
+  const messages: Array<any> = [];
   if (context.messages) {
-    // Anthropic rejects role:"system" in messages — filter them out
     for (const m of context.messages) {
-      if (m.role !== "system") messages.push(m);
+      if (m.role === "system") continue;
+      if (m.role === "assistant" && m.tool_calls?.length) {
+        // Convert assistant tool calls to Anthropic content blocks
+        const content: any[] = [];
+        if (m.content) content.push({ type: "text", text: m.content });
+        for (const tc of m.tool_calls) {
+          let input: any = {};
+          try { input = JSON.parse(tc.function.arguments); } catch {}
+          content.push({ type: "tool_use", id: tc.id, name: tc.function.name, input });
+        }
+        messages.push({ role: "assistant", content });
+      } else if (m.role === "tool") {
+        // Convert tool results to Anthropic tool_result blocks
+        // Group consecutive tool results into a single user message
+        const toolResultBlock = { type: "tool_result", tool_use_id: m.tool_call_id, content: m.content };
+        const last = messages[messages.length - 1];
+        if (last && last.role === "user" && Array.isArray(last.content) && last.content[0]?.type === "tool_result") {
+          last.content.push(toolResultBlock);
+        } else {
+          messages.push({ role: "user", content: [toolResultBlock] });
+        }
+      } else {
+        messages.push({ role: m.role, content: m.content });
+      }
     }
   }
-  messages.push({ role: "user", content: prompt });
+  if (prompt) messages.push({ role: "user", content: prompt });
 
   // Structure system as array of content blocks for optimal caching
   const systemBlocks: any[] = [];
@@ -412,13 +459,26 @@ export async function* routeLocal(
   if (context.systemPrompt) systemParts.push(context.systemPrompt);
   if (context.documentContext) systemParts.push(`Current document context:\n${context.documentContext}`);
 
-  const messages: Array<{ role: string; content: string }> = [];
-  if (context.messages) messages.push(...context.messages.filter(m => m.role !== "system"));
+  const messages: Array<any> = [];
+  if (context.messages) {
+    for (const m of context.messages) {
+      if (m.role === "system") continue;
+      if (m.role === "tool") {
+        messages.push({ role: "tool", tool_call_id: m.tool_call_id, content: m.content });
+      } else if (m.role === "assistant" && m.tool_calls?.length) {
+        messages.push({ role: "assistant", content: m.content || null, tool_calls: m.tool_calls });
+      } else {
+        messages.push({ role: m.role, content: m.content });
+      }
+    }
+  }
 
-  const userContent = systemParts.length
-    ? `${systemParts.join("\n\n")}\n\n${prompt}`
-    : prompt;
-  messages.push({ role: "user", content: userContent });
+  if (prompt) {
+    const userContent = systemParts.length
+      ? `${systemParts.join("\n\n")}\n\n${prompt}`
+      : prompt;
+    messages.push({ role: "user", content: userContent });
+  }
 
   const body: any = { model, messages, stream: false };
   if (context.tools?.length) body.tools = context.tools;
@@ -499,10 +559,20 @@ export async function* routeResponses(
   if (context.messages) {
     for (const m of context.messages) {
       if (m.role === "system") continue; // handled via instructions
-      input.push({ role: m.role, content: m.content });
+      if (m.role === "assistant" && m.tool_calls?.length) {
+        // Responses API: assistant function calls become function_call items
+        for (const tc of m.tool_calls) {
+          input.push({ type: "function_call", call_id: tc.id, name: tc.function.name, arguments: tc.function.arguments });
+        }
+      } else if (m.role === "tool") {
+        // Responses API: tool results become function_call_output items
+        input.push({ type: "function_call_output", call_id: m.tool_call_id, output: m.content });
+      } else {
+        input.push({ role: m.role, content: m.content });
+      }
     }
   }
-  input.push({ role: "user", content: prompt });
+  if (prompt) input.push({ role: "user", content: prompt });
 
   // Convert tool definitions from chat format to Responses API format
   const tools = context.tools?.map((t: any) => ({

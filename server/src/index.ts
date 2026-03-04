@@ -396,7 +396,7 @@ async function processPrompt(entry: PromptEntry, ws: any) {
   try {
     // Determine model early (needed for context strategy)
     const config = readConfig();
-    const model = entry.model || config.defaultModel || "openclaw";
+    let model = entry.model || config.defaultModel || "openclaw";
 
     // Get compact document context; detailed reads happen on demand via tools.
     let documentContext = "";
@@ -506,8 +506,24 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     let modifyingCallCount = 0;
     let fullResponse = "";
     let changeSummaries: string[] = [];
-    // Build systemPrompt addendum for OpenClaw with reference folders
+
+    // ── System Prompt ──
+    // OpenClaw models use curl-based instructions.
+    // Direct API models (OpenAI, Anthropic, local) use native tool calling.
     let systemPromptOverride: string | undefined;
+
+    if (!isOpenClawModel) {
+      // Direct API models — strong, action-oriented system prompt with native tools
+      systemPromptOverride = `You are The Sidebar, an AI legal writing assistant embedded inside Microsoft Word. You have direct tool access to read and edit the currently open Word document.
+
+RULES:
+1. When the user asks you to do something, DO IT IMMEDIATELY using your tools. Do not ask for confirmation or clarification unless the request is genuinely ambiguous.
+2. Read the relevant sections of the document FIRST (using readParagraphs, readDocument, etc.), then make your edits.
+3. Be precise — read before you write so you understand existing content, formatting, and structure.
+4. After making edits, briefly summarize what you changed.
+5. Never tell the user to do something manually that you can do with your tools.`;
+    }
+
     if (isOpenClawModel && referenceFolders.length > 0) {
       let folderHint = "\n\nThe user has designated the following reference folders for this case:\n";
       for (const folder of referenceFolders) {
