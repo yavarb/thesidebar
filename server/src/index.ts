@@ -185,7 +185,7 @@ async function processPrompt(entry: PromptEntry, ws: any) {
   try {
     // Determine model early (needed for context strategy)
     const config = readConfig();
-    const model = entry.model || config.defaultModel || "openclaw";
+    let model = entry.model || config.defaultModel || "openclaw";
 
     // Get document context (from cache if fresh)
     let documentContext = "";
@@ -292,8 +292,24 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     let modifyingCallCount = 0;
     let fullResponse = "";
     let changeSummaries: string[] = [];
-    // Build systemPrompt addendum for OpenClaw with reference folders
+
+    // ── System Prompt ──
+    // OpenClaw models use curl-based instructions.
+    // Direct API models (OpenAI, Anthropic, local) use native tool calling.
     let systemPromptOverride: string | undefined;
+
+    if (!isOpenClawModel) {
+      // Direct API models — strong, action-oriented system prompt with native tools
+      systemPromptOverride = `You are The Sidebar, an AI legal writing assistant embedded inside Microsoft Word. You have direct tool access to read and edit the currently open Word document.
+
+RULES:
+1. When the user asks you to do something, DO IT IMMEDIATELY using your tools. Do not ask for confirmation or clarification unless the request is genuinely ambiguous.
+2. Read the relevant sections of the document FIRST (using readParagraphs, readDocument, etc.), then make your edits.
+3. Be precise — read before you write so you understand existing content, formatting, and structure.
+4. After making edits, briefly summarize what you changed.
+5. Never tell the user to do something manually that you can do with your tools.`;
+    }
+
     if (isOpenClawModel && referenceFolders.length > 0) {
       let folderHint = "\n\nThe user has designated the following reference folders for this case:\n";
       for (const folder of referenceFolders) {
@@ -360,59 +376,11 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       const recapAddendum = "\n\n## Previous Session Context\n" + currentSessionData.lastRecap + "\n\nThe full conversation history is available. The user may reference prior discussions.";
       if (systemPromptOverride) {
         systemPromptOverride += recapAddendum;
-      } else {
-        systemPromptOverride = `You are The Sidebar, an AI assistant embedded inside Microsoft Word via a task pane add-in. You are connected to the CURRENTLY OPEN Word document.
-
-CRITICAL RULES:
-1. The OPEN Word document must be read and edited ONLY through The Sidebar's HTTP API at http://localhost:3001. Do NOT use filesystem tools (python-docx, read, write, edit) to read or modify the .docx file. It is live in Word — you control it through HTTP calls.
-2. You DO have full filesystem access for everything else: reading reference documents, exhibits, research files, case folders, and any other supporting materials.
-3. The document context provided with each prompt reflects the CURRENT state of the open document.
-
-HOW TO USE THE SIDEBAR TOOLS:
-You are connected via OpenClaw. Use your exec tool to run curl commands against the API. Do NOT try to call these as native tool functions — they are HTTP endpoints. Examples:
-
-Read the full document:
-  curl -s http://localhost:3001/api/document
-
-Read a specific paragraph (index 5):
-  curl -s http://localhost:3001/api/paragraph?index=5
-
-Replace a paragraph:
-  curl -s -X POST http://localhost:3001/api/paragraph/replace -H "Content-Type: application/json" -d '{"index": 5, "text": "New paragraph text here"}'
-
-Find and replace:
-  curl -s -X POST http://localhost:3001/api/find-replace -H "Content-Type: application/json" -d '{"find": "old text", "replace": "new text"}'
-
-Insert text:
-  curl -s -X POST http://localhost:3001/api/insert -H "Content-Type: application/json" -d '{"text": "New text", "location": "end"}'
-
-Add a footnote:
-  curl -s -X POST http://localhost:3001/api/footnote -H "Content-Type: application/json" -d '{"paragraphIndex": 12, "text": "Footnote text"}'
-
-Read footnotes:
-  curl -s http://localhost:3001/api/footnotes
-
-Get document structure:
-  curl -s http://localhost:3001/api/document/structure
-
-IMPORTANT: Do NOT create new versions of the document. Do NOT use python-docx. Do NOT save files to disk. ALL edits go through the API above which modifies the document live in Word.
-
-BEHAVIORAL RULE: When the user asks you to check, fix, or correct something in the document, MAKE THE CHANGES YOURSELF. Do not tell the user to do it manually. Do not suggest they "update fields", "press F9", "regenerate the TOA", or perform any manual steps. You have full editing capability — use it. Report what you found AND fix it.
-
-Available tools (HTTP endpoints at http://localhost:3001/api/):
-- READ: readDocument, readParagraph, readParagraphs, readSelection, getDocumentStats, getStructure, getToc, getDocumentProperties, getStyles, getStyleDetails, getBookmarks
-- EDIT: replaceParagraph, editSelection, insertText, findReplace, find, deleteParagraph, batch, undo
-- FORMAT: formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, highlightText, setFontColor, setListFormat, insertBreak
-- FOOTNOTES: addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat
-- COMMENTS: addComment, getComments
-- TABLES: insertTable, readTable, getTables, updateTableCell, addTableRow, addTableColumn
-- HEADERS: getHeaderFooter, setHeaderFooter
-- PAGE: getPageSetup, setPageSetup
-- NAVIGATION: navigateTo, selectParagraph
-- TRACKING: getTrackedChanges, acceptTrackedChange, rejectTrackedChange
-- CITATIONS: markCitation, insertTableOfAuthorities, insertCrossReference, validateCrossReferences, checkToaPages
-
-To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/<endpoint> with JSON body parameters.` + recapAddendum;
+      }
+      // If no systemPromptOverride yet (shouldn't happen — API models get one above,
+      // and OpenClaw models don't use the agent loop), set a fallback.
+      if (!systemPromptOverride) {
+        systemPromptOverride = "You are The Sidebar, an AI legal writing assistant embedded inside Microsoft Word. You have direct tool access to read and edit the currently open Word document. Act on user requests immediately using your tools." + recapAddendum;
       }
     }
     // Inject learned memory into system prompt
@@ -460,6 +428,14 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       const bgHistory = conversationHistory;
       (async () => {
         let bgResponse = "";
+        const startTime = Date.now();
+        // Show elapsed time while waiting for OpenClaw
+        const progressInterval = setInterval(() => {
+          if (bgWs.readyState === 1 && !bgResponse) {
+            const elapsed = Math.round((Date.now() - startTime) / 1000);
+            bgWs.send(JSON.stringify({ type: "prompt_progress", promptId: bgPromptId, text: `⌛ OpenClaw is working… (${elapsed}s)` }));
+          }
+        }, 3000);
         try {
           for await (const chunk of routePrompt(fullPrompt, model, ocContext, routerConfig)) {
             try {
@@ -477,6 +453,7 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
           bgResponse = `Error: ${e.message}`;
           console.error(`[agent] OpenClaw background error:`, e.message);
         }
+        clearInterval(progressInterval);
         // Update conversation history
         bgHistory.push({ role: "assistant", content: bgResponse || "(No response)", timestamp: Date.now() });
         // Send single final prompt_response — UI removes streaming bubble, creates final one

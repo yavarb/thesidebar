@@ -2814,23 +2814,31 @@ Count the words in the original and replacement to calculate the savings accurat
     }
   });
 
-  // Restore on load
-  const savedMode = localStorage.getItem("sidebar-track-changes");
-  if (savedMode === "true") {
-    trackChangesMode = true;
-    modeToggle.textContent = "🔍 Track";
-    modeToggle.classList.add("tracking");
-    Word.run(async (context) => {
-      context.document.changeTrackingMode = Word.ChangeTrackingMode.trackAll;
-      await context.sync();
-    }).catch(() => {});
-    // Also tell server on load
+  // Sync with Word's actual track changes state on load
+  Word.run(async (context) => {
+    context.document.load("changeTrackingMode");
+    await context.sync();
+    const wordMode = context.document.changeTrackingMode;
+    const isTracking = wordMode === Word.ChangeTrackingMode.trackAll || wordMode === Word.ChangeTrackingMode.trackMineOnly;
+    trackChangesMode = isTracking;
+    modeToggle.textContent = isTracking ? "🔍 Track" : "⚡ YOLO";
+    modeToggle.classList.toggle("tracking", isTracking);
+    localStorage.setItem("sidebar-track-changes", String(isTracking));
+    // Sync server
     fetch("http://localhost:3001/api/settings/mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ trackChanges: true }),
+      body: JSON.stringify({ trackChanges: isTracking }),
     }).catch(() => {});
-  }
+  }).catch(() => {
+    // Fallback to localStorage if Word API unavailable
+    const savedMode = localStorage.getItem("sidebar-track-changes");
+    if (savedMode === "true") {
+      trackChangesMode = true;
+      modeToggle.textContent = "🔍 Track";
+      modeToggle.classList.add("tracking");
+    }
+  });
 
   // Restore original state when leaving
   window.addEventListener("beforeunload", () => {
