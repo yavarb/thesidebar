@@ -11,21 +11,31 @@ Built by a litigation partner who uses it daily.
 
 ---
 
-### 🦞 OpenClaw + Word
+## Works With Any LLM
 
-**The Sidebar is the bridge between [OpenClaw](https://github.com/openclaw/openclaw) and Microsoft Word.** If you run OpenClaw, The Sidebar gives your agent full document control — read, edit, footnote, format, cite-check, and rewrite — without copy-pasting between chat and your doc.
+The Sidebar is **model-agnostic**. Plug in whichever provider you already use:
+
+| Provider | How |
+|---|---|
+| **OpenAI** | Paste your API key. GPT-4o, GPT-4.1, GPT-5 — any model. |
+| **Anthropic** | Paste your API key. Claude Opus, Sonnet, Haiku — all supported. |
+| **Ollama / LM Studio** | Point at your local endpoint (`http://localhost:11434`). Fully air-gapped, zero data leaves your machine. |
+| **Any OpenAI-compatible API** | Works with any provider that speaks the OpenAI API format. |
+| **[OpenClaw](https://openclaw.ai)** | Connect your OpenClaw agent for async, long-running autonomous editing sessions. |
+
+OpenClaw is a great option if you want a persistent personal AI agent that can work in the background. But The Sidebar works just as well with a plain OpenAI or Anthropic key — no other software required.
+
+**Web research built in** — regardless of which provider you use, The Sidebar can search the web and fetch URLs without leaving Word. Ask it to find market data, verify a quote, look up a case summary, or pull manufacturer representations — and it inserts results with source footnotes automatically.
+
+---
+
+### 🦞 OpenClaw Integration (Optional)
+
+If you run [OpenClaw](https://github.com/openclaw/openclaw), The Sidebar gives your agent full document control — read, edit, footnote, format, cite-check, and rewrite — without copy-pasting between chat and your doc.
 
 Point The Sidebar at your OpenClaw gateway (`http://localhost:18789`) and your agent gets 55+ document tools, encrypted per-document sessions, reference folder RAG, and a real-time task pane UI inside Word.
 
-**Async architecture** — OpenClaw requests run in the background. You get an immediate response while the agent works (researching, browsing, editing), with text streaming progressively into the task pane as results arrive. No more waiting for long agentic loops to complete.
-
-**Two-track editing** — The agent automatically picks the right approach:
-- **Sidebar API** for surgical edits (fix a typo, add a footnote, find/replace)
-- **python-docx + reload** for bulk operations (rewrite a section, restructure the document) — edits the .docx directly, then tells Word to refresh via `POST /api/document/reload`
-
-**Web research built in** — The Sidebar can search the web and fetch URLs without leaving Word. Ask it to find market data, verify a quote, look up a case summary, or pull manufacturer representations — and it inserts the results with source footnotes automatically.
-
-**Not using OpenClaw?** No problem. The Sidebar works standalone with any LLM provider.
+**Async architecture** — OpenClaw requests run in the background. You get an immediate response while the agent works, with text streaming progressively into the task pane. No more waiting for long agentic loops to complete.
 
 ---
 
