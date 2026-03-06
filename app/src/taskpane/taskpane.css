@@ -111,6 +111,24 @@ b {
 .tool-progress-line.complete .spinner { display: none; }
 .tool-progress-line.complete::after { content: ' ✓'; color: #22c55e; }
 
+.tool-done-summary {
+  font-size: 11px;
+  font-weight: 600;
+  color: #e55;
+  padding: 3px 0 5px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  margin-bottom: 4px;
+}
+.completion-indicator {
+  font-size: 11px;
+  font-weight: 600;
+  color: #e55;
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+}
+.done-dot { color: #e55; }
+
 /* ── Activity Block (reasoning + tool calls) ── */
 .activity-block {
   margin: 6px 0;

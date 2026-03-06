@@ -81,6 +81,8 @@ export interface PromptContext {
   sessionUser?: string;
   /** Abort signal — when triggered, in-flight HTTP requests are destroyed */
   signal?: AbortSignal;
+  /** Tool choice: "auto", "required", "none", or { type: "function", name: "..." } */
+  tool_choice?: any;
 }
 
 /** Cache statistics for prompt caching */
@@ -221,11 +223,12 @@ export async function* routeOpenClaw(
   if (context.messages) messages.push(...context.messages);
   messages.push({ role: "user", content: prompt });
 
-  const body: any = { model, messages, stream: false };
+  const body: any = { model, messages, stream: true };
   if (context.sessionUser) body.user = context.sessionUser;
   if (context.tools?.length) body.tools = context.tools;
+  if (context.tool_choice) body.tool_choice = context.tool_choice;
 
-  const headers: Record<string, string> = { "Content-Type": "application/json", "x-openclaw-agent-id": "thesidebar" };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
 
   if (config.openclawToken) {
     headers["Authorization"] = `Bearer ${config.openclawToken}`;
@@ -234,29 +237,29 @@ export async function* routeOpenClaw(
   const url = baseUrl.replace(/\/$/, "") + "/v1/chat/completions";
   const res = await httpRequest(url, { method: "POST", headers, signal: context.signal }, body);
 
-  let raw = "";
-  for await (const chunk of res) raw += chunk.toString();
-
   if (res.statusCode && res.statusCode >= 400) {
-    throw new Error(`OpenClaw API error ${res.statusCode}: ${raw.slice(0, 500)}`);
+    let errBody = "";
+    for await (const chunk of res) errBody += chunk.toString();
+    throw new Error(`OpenClaw API error ${res.statusCode}: ${errBody.slice(0, 500)}`);
   }
 
-  // Parse the JSON response and extract text content
-  try {
-    const parsed = JSON.parse(raw);
-    const content = parsed?.choices?.[0]?.message?.content;
-    if (typeof content === "string" && content) {
-      yield content;
-    } else if (Array.isArray(content)) {
-      const joined = content
-        .map((p: any) => (typeof p?.text === "string" ? p.text : ""))
-        .filter(Boolean)
-        .join("\n");
-      if (joined) yield joined;
+  // Stream SSE deltas — same pattern as routeOpenAI
+  let buffer = "";
+  for await (const chunk of res) {
+    buffer += chunk.toString();
+    const { events, remainder } = parseSSELines(buffer);
+    buffer = remainder;
+    for (const event of events) {
+      try {
+        const parsed = JSON.parse(event);
+        const delta = parsed.choices?.[0]?.delta;
+        if (delta?.tool_calls) {
+          yield JSON.stringify({ type: "tool_calls", delta: delta.tool_calls });
+        } else if (delta?.content) {
+          yield delta.content;
+        }
+      } catch {}
     }
-  } catch {
-    // If not JSON, yield raw response
-    if (raw.trim()) yield raw.trim();
   }
 }
 
@@ -289,8 +292,9 @@ export async function* routeOpenAI(
   }
   if (prompt) messages.push({ role: "user", content: prompt });
 
-  const body: any = { model, messages, stream: true, stream_options: { include_usage: true } };
+  const body: any = { model, messages, stream: true, stream_options: { include_usage: true }, max_completion_tokens: 16384 };
   if (context.tools?.length) body.tools = context.tools;
+  if (context.tool_choice) body.tool_choice = context.tool_choice;
 
   const res = await httpRequest("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -383,7 +387,7 @@ export async function* routeAnthropic(
     systemBlocks.push({ type: "text", text: `Current document context:\n${context.documentContext}`, cache_control: { type: "ephemeral" } });
   }
 
-  const body: any = { model, messages, max_tokens: 4096, stream: true };
+  const body: any = { model, messages, max_tokens: 16384, stream: true };
   if (systemBlocks.length) body.system = systemBlocks;
 
   if (context.tools?.length) {
@@ -493,7 +497,7 @@ export async function* routeLocal(
     messages.push({ role: "user", content: userContent });
   }
 
-  const body: any = { model, messages, stream: false };
+  const body: any = { model, messages, stream: false, max_tokens: 16384 };
   if (context.tools?.length) body.tools = context.tools;
 
   const base = baseUrl.replace(/\/$/, "");
@@ -606,9 +610,12 @@ export async function* routeResponses(
     model,
     input,
     stream: false,
+    max_output_tokens: 16384,
   };
   if (instructions) body.instructions = instructions;
-  if (tools?.length) body.tools = tools;
+  if (tools?.length) body.tools = [...tools, { type: "web_search_preview" }];
+  else body.tools = [{ type: "web_search_preview" }];
+  if (context.tool_choice) body.tool_choice = context.tool_choice;
 
   const res = await httpRequest("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -629,6 +636,7 @@ export async function* routeResponses(
   try {
     const parsed = JSON.parse(raw);
     const output = parsed.output || [];
+    console.log(`[responses] Output items: ${output.length}, types: ${output.map((i: any) => i.type).join(", ")}`);
 
     // Extract reasoning if present
     const reasoning = parsed.reasoning?.summary;

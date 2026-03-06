@@ -12,15 +12,13 @@
  * Supports both OpenAI and Anthropic tool-calling formats.
  */
 
-import http from "http";
-import https from "https";
 import { URL } from "url";
-import { TOOL_DEFINITIONS, TOOL_ENDPOINTS, ToolEndpoint } from "./tools";
+import { TOOL_DEFINITIONS, TOOL_ENDPOINTS } from "./tools";
 import { routePrompt, RouterConfig, PromptContext, ConversationMessage, httpRequest } from "./llm-router";
 import { isTrackChangesEnabled } from "./track-changes";
 
-/** Maximum number of tool-calling iterations to prevent infinite loops */
-const MAX_ITERATIONS = 15;
+/** Models exit naturally when done (no tool calls = loop exits). No cap needed. */
+const MAX_ITERATIONS = Infinity;
 
 /** Tools that modify document content */
 const MODIFYING_TOOL_NAMES = new Set([
@@ -78,8 +76,7 @@ export interface AgentLoopOptions {
   documentContext?: string;
   /** The Sidebar server URL for executing tools (default: https://localhost:3001) */
   serverUrl?: string;
-  /** Max tool-call iterations (default: 15) */
-  maxIterations?: number;
+
   /** Callback for tool execution events */
   onToolCall?: (call: ToolCall) => void;
   /** Callback for tool results */
@@ -270,7 +267,6 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
     systemPrompt,
     documentContext,
     serverUrl = DEFAULT_SERVER_URL,
-    maxIterations = MAX_ITERATIONS,
     onToolCall,
     onToolResult,
     sessionUser,
@@ -302,9 +298,16 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
   let iteration = 0;
   const changeSummaries: string[] = [];
 
-  while (iteration < maxIterations) {
+  while (true) {
     if (options.signal?.aborted) return;
     iteration++;
+
+    // Force tool use on first iteration so models act instead of narrate
+    if (iteration === 1 && context.tools?.length) {
+      context.tool_choice = "required";
+    } else {
+      context.tool_choice = "auto";
+    }
 
     // Stream text chunks immediately while collecting tool calls
     let fullText = "";
@@ -313,6 +316,7 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
     let anthropicCurrentTool: { id: string; name: string; argsJson: string } | null = null;
 
     for await (const chunk of routePrompt(currentPrompt, model, context, config)) {
+      if (options.signal?.aborted) return;
       let isToolEvent = false;
       try {
         const parsed = JSON.parse(chunk);
@@ -518,7 +522,4 @@ export async function* runAgentLoop(options: AgentLoopOptions): AsyncGenerator<s
     // naturally continues after seeing tool results
     currentPrompt = "";
   }
-
-  // Max iterations reached
-  yield "[Agent loop reached maximum iterations. Partial results may be available in the conversation above.]";
 }

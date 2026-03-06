@@ -1,4 +1,5 @@
 import { parsePageContent, checkToaEntries } from "./toa-checker";
+import { webSearch, webFetch } from "./browser";
 import { setTrackChanges, isTrackChangesEnabled } from "./track-changes";
 import { buildMemoryContext, addGlobalMemory, addDocMemory, getMemoryEntries, deleteMemoryEntry, MEMORY_EXTRACTION_PROMPT } from "./memory";
 import { runAgentLoop } from "./agent-loop";
@@ -6,7 +7,7 @@ import { v4 as uuidv4 } from "uuid";
 import { saveSession, loadSession, deleteSession, cleanExpiredSessions, ensureMachineKey, SessionData, generateSessionRecap, searchConversationHistory } from "./sessions";
 import { getContextSize, manageContext } from "./context";
 import { resolveModel, cacheStats, routePrompt, RouterConfig } from "./llm-router";
-import { readConfig } from "./settings";
+import { readConfig, writeConfig, StandingOrder } from "./settings";
 import { handleGetSettings, handlePostSettings } from "./settings";
 import { queryDocuments, listDocuments as listRefDocs, getStatus as getRefStatus, rescan as rescanRefs, startPeriodicScan, stopPeriodicScan, getDocumentCount as getRefDocCount } from "./references";
 import express from "express";
@@ -24,10 +25,103 @@ const VERSION = "0.3.0";
 const HEARTBEAT_INTERVAL = 10000;
 const DEFAULT_TIMEOUT = 20000;
 
+// ── Standing Orders ──
+
+/** Build the standing orders block to inject into every system prompt. */
+function buildStandingOrdersBlock(): string {
+  const config = readConfig();
+  const orders = (config.standingOrders || []).filter(o => o.enabled);
+  if (orders.length === 0) return "";
+  return "\n\nSTANDING ORDERS (non-negotiable — apply to every response without exception):\n" +
+    orders.map((o, i) => `${i + 1}. ${o.text}`).join("\n");
+}
+
+// ── OpenClaw System Prompt ──
+// Shown to OpenClaw (Claude) models operating through the Sidebar. Single source of truth —
+// do not duplicate this string. Append folder hints / recap / memory after as needed.
+const OPENCLAW_SYSTEM_PROMPT = `You are The Sidebar, an AI assistant embedded inside Microsoft Word via a task pane add-in. You are connected to the CURRENTLY OPEN Word document.
+
+CRITICAL RULES:
+1. The OPEN Word document must be read and edited ONLY through The Sidebar's HTTP API at http://localhost:3001. Do NOT use filesystem tools (python-docx, read, write, edit) to read or modify the .docx file. It is live in Word - you control it through HTTP calls.
+2. You DO have full filesystem access for everything else: reading reference documents, exhibits, research files, case folders, and any other supporting materials.
+3. The document context provided with each prompt reflects the CURRENT state of the open document.
+
+HOW TO USE THE SIDEBAR TOOLS:
+You are connected via OpenClaw. Use your exec tool to run curl commands against the API. Do NOT try to call these as native tool functions - they are HTTP endpoints. Examples:
+
+Read the full document:
+  curl -s http://localhost:3001/api/document
+
+Read a specific paragraph (index 5):
+  curl -s http://localhost:3001/api/paragraph?index=5
+
+Replace a paragraph:
+  curl -s -X POST http://localhost:3001/api/paragraph/replace -H "Content-Type: application/json" -d '{"index": 5, "text": "New paragraph text here"}'
+
+Find and replace:
+  curl -s -X POST http://localhost:3001/api/find-replace -H "Content-Type: application/json" -d '{"find": "old text", "replace": "new text"}'
+
+Insert text:
+  curl -s -X POST http://localhost:3001/api/insert -H "Content-Type: application/json" -d '{"text": "New text", "location": "end"}'
+
+Add a footnote:
+  curl -s -X POST http://localhost:3001/api/footnote -H "Content-Type: application/json" -d '{"paragraphIndex": 12, "text": "Footnote text"}'
+
+Read footnotes:
+  curl -s http://localhost:3001/api/footnotes
+
+Get document structure:
+  curl -s http://localhost:3001/api/document/structure
+
+IMPORTANT: Do NOT create new versions of the document. Do NOT use python-docx. Do NOT save files to disk. ALL edits go through the API above which modifies the document live in Word.
+
+BEHAVIORAL RULE: When the user asks you to check, fix, or correct something in the document, MAKE THE CHANGES YOURSELF. Do not tell the user to do it manually. Do not suggest they "update fields", "press F9", "regenerate the TOA", or perform any manual steps. You have full editing capability - use it. Report what you found AND fix it.
+
+EDITING SAFETY RULE: Do NOT use editSelection for ordinary document edits. It is selection-state dependent and can apply changes in the wrong location. Prefer replaceParagraph and findReplace for anchored, deterministic edits with cleaner Track Changes output. Use editSelection only when the user explicitly asks to edit the current selection and you have just verified it with readSelection.
+
+Available tools (HTTP endpoints at http://localhost:3001/api/):
+- READ: readDocument, readParagraph, readParagraphs, readSelection, getDocumentStats, getStructure, getToc, getDocumentProperties, getStyles, getStyleDetails, getBookmarks
+- EDIT: replaceParagraph, insertText, findReplace, find, deleteParagraph, batch, undo
+- FORMAT: formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, highlightText, setFontColor, setListFormat, insertBreak
+- FOOTNOTES: addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat
+- COMMENTS: addComment, getComments
+- TABLES: insertTable, readTable, getTables, updateTableCell, addTableRow, addTableColumn
+- HEADERS: getHeaderFooter, setHeaderFooter
+- PAGE: getPageSetup, setPageSetup
+- NAVIGATION: navigateTo, selectParagraph
+- TRACKING: getTrackedChanges, acceptTrackedChange, rejectTrackedChange
+- CITATIONS: markCitation, markCitations, insertTableOfAuthorities, insertCrossReference, validateCrossReferences, checkToaPages
+
+CITATION MARKING RULES (follow precisely):
+1. STRING CITE CLUSTERS: When multiple citations are joined by semicolons (e.g., "Smith v. Jones, 123 F.3d 456 (2d Cir. 2020); Doe v. Roe, 789 F.3d 123 (9th Cir. 2021)"), EACH citation is a separate source requiring its own TA mark. Do not stop at the first citation in the cluster.
+2. SHORT CITES AFTER SEMICOLONS: A short cite that appears after a semicolon (e.g., "; Smith, 123 F.3d at 456") is still a full citation entry that needs a TA mark. The semicolon is punctuation, not part of the citation text — use the citation text only (without the semicolon) as the searchText parameter.
+3. SCAN COMPREHENSIVELY: Read each paragraph in full before deciding what to mark. A citation cluster like "see id. at 5; Smith, 123 F.3d at 456; Doe, 789 F.3d at 123" contains three separate entries — mark all three.
+4. FOOTNOTES: Scan footnote text separately using readFootnotes. Citations in footnotes require TA marks just like body text citations.
+5. USE searchText: When the citation appears in a cluster or with surrounding punctuation, pass the citation text (without semicolons, "see", "id.", etc.) as the searchText parameter so Word can find it cleanly.
+
+To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/<endpoint> with JSON body parameters.`;
+
 const app = express();
 app.use(cors());
 app.use(compression());
 app.use(express.json({ limit: "10mb" }));
+
+// ── OpenClaw Activity Middleware ──
+// Intercepts API calls made by Claude (via curl) during an active OpenClaw job
+// and pushes real-time progress events to the task pane WebSocket.
+app.use((req, _res, next) => {
+  if (activeOcPromptId !== null && taskPaneWs?.readyState === 1) {
+    const label = getOcProgressLabel(req.method, req.path);
+    if (label) {
+      taskPaneWs.send(JSON.stringify({
+        type: "prompt_progress",
+        promptId: activeOcPromptId,
+        progressText: label,  // updates thinking indicator text without creating a streaming entry
+      }));
+    }
+  }
+  next();
+});
 
 // ── Static Files (task pane UI) ──
 const appDistCandidates = [
@@ -51,37 +145,7 @@ let sessionId = "sidebar-" + Date.now() + "-" + Math.random().toString(36).slice
 /** Conversation history for non-OpenClaw models */
 let conversationHistory: { role: string; content: string; timestamp?: number }[] = [];
 let currentSessionData: SessionData | null = null;
-// ── In-Memory Document Index ──
-let documentIndex: { paragraphs: {index: number, text: string, listString?: string}[], builtAt: number, hash: string } | null = null;
 
-
-
-
-
-async function buildDocumentIndex(): Promise<typeof documentIndex> {
-  try {
-    const result = await sendCommand("getParagraphs", { compact: true });
-    const paragraphs = (result?.paragraphs || []).map((p: any) => ({
-      index: p.index,
-      text: p.text,
-      listString: p.listString,
-    }));
-    const raw = paragraphs.map((p: any) => p.text).join("");
-    const hash = raw.substring(0, 100) + "|" + paragraphs.length;
-    documentIndex = { paragraphs, builtAt: Date.now(), hash };
-    console.log(`[index] Built document index: ${paragraphs.length} paragraphs`);
-    return documentIndex;
-  } catch (e: any) {
-    console.error("[index] Failed to build:", e.message);
-    return null;
-  }
-}
-
-function invalidateIndex(): void {
-  if (documentIndex) {
-    documentIndex.builtAt = 0; // Mark as stale
-  }
-}
 
 /** Single task pane WebSocket connection (localhost only) */
 let taskPaneWs: WebSocket | null = null;
@@ -92,53 +156,52 @@ const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) =>
 type PromptEntry = { id: number; text: string; model?: string; context?: string; timestamp: number; clientId?: string };
 const promptQueue: PromptEntry[] = [];
 let currentAbortController: AbortController | null = null;
-let lastRestoreMeta: { paragraphIndex?: number; restoredAt: number; note: string } | null = null;
 
-type EditApproach = "filesystem" | "live";
+// ── OpenClaw Activity Tracking ──
+// When an OpenClaw prompt is being processed, we track the active prompt ID so
+// Express middleware can intercept incoming API calls (Claude's curl commands)
+// and push friendly progress events to the task pane in real time.
+let activeOcPromptId: number | null = null;
 
-function chooseOpenClawEditApproach(promptText: string, trackModeOn: boolean): { approach: EditApproach; reason: string; scoreFilesystem: number; scoreLive: number } {
-  const t = (promptText || "").toLowerCase();
+const OC_PROGRESS_MAP: { method: string; pattern: RegExp; label: string }[] = [
+  { method: "GET",  pattern: /^\/api\/document$/,               label: "📖 Reading document…" },
+  { method: "GET",  pattern: /^\/api\/document\/paragraphs/,     label: "📖 Reading paragraphs…" },
+  { method: "GET",  pattern: /^\/api\/document\/structure/,      label: "🗂️ Reading document structure…" },
+  { method: "GET",  pattern: /^\/api\/document\/stats/,          label: "📊 Checking document stats…" },
+  { method: "GET",  pattern: /^\/api\/document\/toc/,            label: "📋 Reading table of contents…" },
+  { method: "GET",  pattern: /^\/api\/paragraph/,                label: "📖 Reading paragraph…" },
+  { method: "GET",  pattern: /^\/api\/footnotes/,                label: "📖 Reading footnotes…" },
+  { method: "GET",  pattern: /^\/api\/selection/,                label: "🔍 Reading selection…" },
+  { method: "POST", pattern: /^\/api\/paragraph\/replace/,       label: "✏️ Editing paragraph…" },
+  { method: "POST", pattern: /^\/api\/find-replace/,             label: "🔍 Finding and replacing…" },
+  { method: "POST", pattern: /^\/api\/find$/,                     label: "🔍 Searching document…" },
+  { method: "POST", pattern: /^\/api\/insert/,                   label: "✏️ Inserting text…" },
+  { method: "POST", pattern: /^\/api\/footnote/,                 label: "📝 Adding footnote…" },
+  { method: "POST", pattern: /^\/api\/footnote\/update/,         label: "📝 Updating footnote…" },
+  { method: "DELETE", pattern: /^\/api\/footnote/,               label: "🗑️ Deleting footnote…" },
+  { method: "POST", pattern: /^\/api\/citation\/mark-batch/,     label: "📌 Marking citations (batch)…" },
+  { method: "POST", pattern: /^\/api\/citation\/mark/,           label: "📌 Marking citation…" },
+  { method: "POST", pattern: /^\/api\/citation\/toa/,            label: "📋 Inserting Table of Authorities…" },
+  { method: "POST", pattern: /^\/api\/comment/,                  label: "💬 Adding comment…" },
+  { method: "POST", pattern: /^\/api\/format/,                   label: "🎨 Formatting text…" },
+  { method: "POST", pattern: /^\/api\/style/,                    label: "🎨 Applying style…" },
+  { method: "POST", pattern: /^\/api\/batch/,                    label: "⚡ Applying batch edits…" },
+  { method: "POST", pattern: /^\/api\/undo/,                     label: "↩️ Undoing changes…" },
+  { method: "POST", pattern: /^\/api\/table/,                    label: "📊 Editing table…" },
+  { method: "POST", pattern: /^\/api\/paragraph\/delete/,        label: "🗑️ Deleting paragraph…" },
+  { method: "POST", pattern: /^\/api\/cross-reference/,          label: "🔗 Inserting cross-reference…" },
+  { method: "POST", pattern: /^\/api\/toa\/check/,               label: "🔍 Checking TOA pages…" },
+  { method: "POST", pattern: /^\/api\/navigate/,                 label: "🧭 Navigating document…" },
+  { method: "GET",  pattern: /^\/api\/references/,               label: "📁 Searching reference documents…" },
+];
 
-  const rewriteHints = [
-    "rewrite", "redraft", "restructure", "from scratch", "entire paragraph", "whole paragraph",
-    "rewrite this section", "new draft", "overhaul", "replace this section"
-  ];
-  const surgicalHints = [
-    "tighten", "typo", "grammar", "proofread", "polish", "clarify", "shorten", "trim",
-    "targeted", "phrase", "sentence", "track changes", "redline"
-  ];
-
-  const hasRewriteHint = rewriteHints.some(k => t.includes(k));
-  const hasSurgicalHint = surgicalHints.some(k => t.includes(k));
-
-  // Deterministic safety gates
-  if (trackModeOn && !hasRewriteHint) {
-    return { approach: "live", reason: "Track mode on without explicit rewrite intent", scoreFilesystem: 0, scoreLive: 100 };
+function getOcProgressLabel(method: string, path: string): string | null {
+  for (const entry of OC_PROGRESS_MAP) {
+    if (entry.method === method && entry.pattern.test(path)) return entry.label;
   }
-  if (trackModeOn && hasRewriteHint) {
-    return { approach: "live", reason: "Track mode requires live in-Word edits for redlines", scoreFilesystem: 10, scoreLive: 100 };
-  }
-
-  // Fuzzy scoring for YOLO mode
-  let scoreFilesystem = 0;
-  let scoreLive = 0;
-
-  if (hasRewriteHint) scoreFilesystem += 4;
-  if (hasSurgicalHint) scoreLive += 4;
-
-  if (t.includes("section") || t.includes("multiple paragraphs") || t.includes("across the document")) scoreFilesystem += 2;
-  if (t.includes("selected") || t.includes("this paragraph") || t.includes("this sentence")) scoreLive += 2;
-
-  // Ambiguous defaults to live (safer/transparent)
-  if (Math.abs(scoreFilesystem - scoreLive) <= 1) {
-    return { approach: "live", reason: "Ambiguous intent — defaulting to safer live edits", scoreFilesystem, scoreLive };
-  }
-
-  if (scoreFilesystem > scoreLive) {
-    return { approach: "filesystem", reason: "Rewrite-heavy intent in YOLO mode", scoreFilesystem, scoreLive };
-  }
-  return { approach: "live", reason: "Surgical/tightening intent", scoreFilesystem, scoreLive };
+  return null;
 }
+
 const promptLog = new Map<number, PromptEntry>();
 let promptId = 0;
 const promptWaiters: { resolve: (v: any) => void; timer: NodeJS.Timeout }[] = [];
@@ -165,7 +228,7 @@ let exchangeIdCounter = 0;
 // ── Tool Progress Messages ──
 const TOOL_PROGRESS: Record<string, (args: any) => string> = {
   readDocument: () => "📖 Reading document...",
-  readParagraphs: (a: any) => `📖 Reading paragraphs ${a.from || ''}–${a.to || ''}...`,
+  readParagraphs: (a: any) => `📖 Reading paragraphs ${a.from || ''}-${a.to || ''}...`,
   getParagraph: (a: any) => `📖 Reading paragraph ${a.index}...`,
   getParagraphs: () => "📖 Reading paragraphs...",
   updateParagraph: (a: any) => `✏️ Editing paragraph ${a.index}...`,
@@ -218,183 +281,12 @@ const TOOL_PROGRESS: Record<string, (args: any) => string> = {
   getPageNumbers: () => "📋 Getting page info...",
 };
 
-async function getActiveWordDocPath(): Promise<string> {
-  const { execSync } = require("child_process");
-  const docPath = execSync(
-    `osascript -e 'tell application "Microsoft Word" to return POSIX path of (full name of active document as text)'`,
-    { encoding: "utf-8", timeout: 5000 }
-  ).trim();
-  if (!docPath || docPath === "missing value") throw new Error("No active document in Word");
-  return docPath;
-}
 
-function extractFirstJsonObject(text: string): any {
-  const m = text.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error("Model did not return JSON");
-  return JSON.parse(m[0]);
-}
-
-async function getFilesystemEditPayloadWithRetry(raw: string, model: string, routerConfig: RouterConfig): Promise<any> {
-  try {
-    return extractFirstJsonObject(raw);
-  } catch {
-    const repairPrompt = `Convert the following assistant output into strict JSON only with keys summary, changes, python. Do not add markdown.\n\n${raw}`;
-    let repaired = "";
-    for await (const chunk of routePrompt(repairPrompt, model, { messages: [] }, routerConfig)) {
-      try {
-        const p = JSON.parse(chunk);
-        if (p?.type) continue;
-      } catch {}
-      repaired += chunk;
-    }
-    return extractFirstJsonObject(repaired);
-  }
-}
-
-function validateFilesystemEditPayload(parsed: any): { summary: string; python: string } {
-  if (!parsed || typeof parsed !== "object") {
-    throw new Error("Invalid model payload: expected JSON object");
-  }
-
-  const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
-  const python = typeof parsed.python === "string" ? parsed.python.trim() : "";
-
-  if (!summary) throw new Error("Invalid model payload: missing summary");
-  if (!python) throw new Error("Invalid model payload: missing python script");
-
-  // Basic safety/shape checks to fail fast on garbage responses
-  if (!/docx|Document|python-docx|DOC_PATH|doc\.save/i.test(python)) {
-    throw new Error("Invalid model payload: python script does not look like a docx edit script");
-  }
-  if (python.length > 120000) {
-    throw new Error("Invalid model payload: python script too large");
-  }
-
-  return { summary, python };
-}
-
-async function runOpenClawFilesystemEdit(entry: PromptEntry, model: string, routerConfig: RouterConfig, ws: any, signal?: AbortSignal): Promise<string> {
-  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Capturing context…" }));
-
-  // Best-effort context capture before file rewrite/reload.
-  let restoreIndex: number | undefined;
-  try {
-    const sel = await sendCommand("getSelection", {}, 8000);
-    if (typeof sel?.listString === "string" && sel.listString.trim()) {
-      const all = await sendCommand("getParagraphs", { from: 0, to: 2000, compact: true }, 15000);
-      const hit = (all?.paragraphs || []).find((p: any) => p?.listString === sel.listString);
-      if (hit && typeof hit.index === "number") restoreIndex = hit.index;
-    }
-  } catch {}
-
-  const docPath = await getActiveWordDocPath();
-  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Reading document path…" }));
-
-  const ocPrompt = `You are editing a Microsoft Word .docx file on disk using python-docx.
-
-User request:
-${entry.text}
-
-Document path is available via DOC_PATH environment variable.
-
-Return ONLY JSON with this shape:
-{
-  "summary": "short description of edits made",
-  "changes": ["bullet-style change 1", "bullet-style change 2"],
-  "python": "complete python3 script that edits DOC_PATH in-place with python-docx and saves"
-}
-
-Requirements:
-- Use python-docx only.
-- Open DOC_PATH, apply requested edits, save DOC_PATH.
-- SMART QUOTES ONLY (non-negotiable): double quotes must be “ ” and single quotes must be ‘ ’ in all inserted/replaced text.
-- Never use straight quotes in inserted/replaced text.
-- Provide 1-10 concise change bullets in "changes".
-- No markdown, no explanation, JSON only.`;
-
-  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Planning edit script…" }));
-
-  let raw = "";
-  for await (const chunk of routePrompt(ocPrompt, model, { messages: [], sessionUser: "thesidebar:" + sessionId, signal }, routerConfig)) {
-    try {
-      const p = JSON.parse(chunk);
-      if (p?.type) continue;
-    } catch {}
-    raw += chunk;
-    if (ws.readyState === 1) {
-      const preview = raw.length > 220 ? "…" + raw.slice(-220) : raw;
-      ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: `Planning edit script… ${preview}` }));
-    }
-  }
-
-  if (signal?.aborted) throw new Error("Aborted");
-  const parsed = await getFilesystemEditPayloadWithRetry(raw, model, routerConfig);
-  const validated = validateFilesystemEditPayload(parsed);
-  const python = validated.python;
-  const summary = validated.summary;
-  const modelChanges = Array.isArray(parsed?.changes) ? parsed.changes.slice(0, 20).map((x: any) => String(x)) : [];
-
-  if (signal?.aborted) throw new Error("Aborted");
-  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Applying filesystem edits…" }));
-  const tmpPath = path.join("/tmp", `thesidebar-edit-${Date.now()}.py`);
-  fs.writeFileSync(tmpPath, python, "utf-8");
-  try {
-    const { execFileSync } = require("child_process");
-    execFileSync("python3", [tmpPath], {
-      env: { ...process.env, DOC_PATH: docPath },
-      stdio: "pipe",
-      timeout: 120000,
-      encoding: "utf-8",
-    });
-  } finally {
-    try { fs.unlinkSync(tmpPath); } catch {}
-  }
-
-  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Reloading Word document…" }));
-  const { execSync } = require("child_process");
-  execSync(`osascript -e 'tell application "Microsoft Word" to close active document saving no' -e 'delay 0.3' -e 'tell application "Microsoft Word" to open "${docPath}"' -e 'tell application "Microsoft Word" to activate'`, { encoding: "utf-8", timeout: 15000 });
-
-  // Best-effort context restoration after reload.
-  if (ws.readyState === 1) ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: "Restoring context…" }));
-  let restored = false;
-  if (typeof restoreIndex === "number") {
-    try {
-      await new Promise(r => setTimeout(r, 1200));
-      await sendCommand("selectParagraph", { index: restoreIndex }, 10000);
-      restored = true;
-    } catch {}
-  }
-
-  lastRestoreMeta = {
-    paragraphIndex: restoreIndex,
-    restoredAt: Date.now(),
-    note: restored
-      ? `Context restored to paragraph ${restoreIndex}`
-      : "Document reloaded; exact paragraph restore not confirmed",
-  };
-
-  if (ws.readyState === 1) {
-    ws.send(JSON.stringify({
-      type: "prompt_progress",
-      promptId: entry.id,
-      status: "context_restored",
-      restored,
-      paragraphIndex: restoreIndex,
-      note: lastRestoreMeta.note,
-    }));
-  }
-
-  const bulletLines = modelChanges.length > 0
-    ? modelChanges.map((c: string, i: number) => `${i + 1}. ${c}`).join("\n")
-    : "1. Applied requested document edits.";
-
-  const finalSummary = `${summary}\n\nEdit summary:\n${bulletLines}\n\nReload/context:\n- ${lastRestoreMeta.note}`;
-  return finalSummary;
-}
 
 async function processPrompt(entry: PromptEntry, ws: any) {
   const abortController = new AbortController();
   currentAbortController = abortController;
+  let ocProgressInterval: ReturnType<typeof setInterval> | null = null;
   try {
     // Determine model early (needed for context strategy)
     const config = readConfig();
@@ -412,7 +304,7 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       if (!model.startsWith("openai:") && !model.startsWith("anthropic:") && !model.startsWith("local:")) {
         documentContext += "\n\nYou are operating through The Sidebar Word add-in. To read or edit document content, use curl to call the Sidebar API at http://localhost:3001 (see Integration Protocol in MEMORY.md). Read relevant sections before making edits.";
       } else {
-        documentContext += "\n\nUse readDocument/readParagraph/readParagraphs as needed. Do not ask the user what to read — read it.";
+        documentContext += "\n\nUse readDocument/readParagraph/readParagraphs as needed. Do not ask the user what to read - read it.";
       }
     } catch (e: any) {
       console.error("[agent] Failed to get document:", e.message);
@@ -462,12 +354,8 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     }
 
     // Build prompt with context
-    const quoteRule = "NON-NEGOTIABLE EDIT RULE: Whenever you insert or replace quotation marks, use curly smart quotes only (double: “ ”, single: ‘ ’). Never use straight quotes (\" or ').";
+    const quoteRule = "NON-NEGOTIABLE EDIT RULE: Whenever you insert or replace quotation marks, use curly smart quotes only (double: \u201c \u201d, single: \u2018 \u2019). Never use straight quotes (\\\" or \\').";
     let fullPrompt = `${quoteRule}\n\n${entry.text}`;
-    let restoreContextPrefix = "";
-    if (lastRestoreMeta && Date.now() - lastRestoreMeta.restoredAt < 15 * 60 * 1000) {
-      restoreContextPrefix = `[Post-reload context: ${JSON.stringify(lastRestoreMeta)}]\n\n`;
-    }
 
     if (entry.context) {
       let contextBlock = entry.context;
@@ -477,9 +365,7 @@ async function processPrompt(entry: PromptEntry, ws: any) {
           contextBlock = `Selected context (authoritative anchor metadata): ${JSON.stringify(parsed)}`;
         }
       } catch {}
-      fullPrompt = `${restoreContextPrefix}[${contextBlock}]\n\n${entry.text}`;
-    } else if (restoreContextPrefix) {
-      fullPrompt = `${restoreContextPrefix}${entry.text}`;
+      fullPrompt = `[${contextBlock}]\n\n${entry.text}`;
     }
 
     // Determine backend for conversation history strategy.
@@ -496,14 +382,14 @@ async function processPrompt(entry: PromptEntry, ws: any) {
       };
       const contextSize = await getContextSize(spec.backend, spec.modelId, ctxConfig);
       const budgetPercent = config.contextBudgetPercent ?? 40;
-      const managed = manageContext(conversationHistory, contextSize, documentContext, budgetPercent);
+      const managed = await manageContext(conversationHistory, contextSize, documentContext, budgetPercent, { model, routerConfig });
       managedHistory = managed.messages;
       if (managed.compactedCount > 0) {
         console.log(`[context] Compacted ${managed.compactedCount} messages, ~${managed.estimatedTokens} tokens used (budget: ${Math.floor(contextSize * budgetPercent / 100)})`);
       }
     }
 
-    // Run agent loop and stream results — track modifying tool calls for revert
+    // Run agent loop and stream results - track modifying tool calls for revert
     const currentExchangeId = ++exchangeIdCounter;
     let modifyingCallCount = 0;
     let fullResponse = "";
@@ -515,15 +401,17 @@ async function processPrompt(entry: PromptEntry, ws: any) {
     let systemPromptOverride: string | undefined;
 
     if (!isOpenClawModel) {
-      // Direct API models — strong, action-oriented system prompt with native tools
+      // Direct API models - strong, action-oriented system prompt with native tools
       systemPromptOverride = `You are The Sidebar, an AI legal writing assistant embedded inside Microsoft Word. You have direct tool access to read and edit the currently open Word document.
 
 RULES:
-1. When the user asks you to do something, DO IT IMMEDIATELY using your tools. Do not ask for confirmation or clarification unless the request is genuinely ambiguous.
-2. Read the relevant sections of the document FIRST (using readParagraphs, readDocument, etc.), then make your edits.
-3. Be precise — read before you write so you understand existing content, formatting, and structure.
-4. After making edits, briefly summarize what you changed.
-5. Never tell the user to do something manually that you can do with your tools.`;
+1. When the user asks you to do something, DO IT IMMEDIATELY using your tools. Do not ask for confirmation, clarification, paragraph indices, metadata, or any other information. You have tools to read the document - use them to find what you need.
+2. NEVER ask the user to paste text, provide indices, or supply context. Call readDocument, readParagraphs, or getStructure yourself to locate content.
+3. Read the relevant sections of the document FIRST, then make your edits. If the user references a section, heading, or paragraph, read the document to find it yourself.
+4. Be precise - read before you write so you understand existing content, formatting, and structure.
+5. After making edits, briefly summarize what you changed.
+6. Never tell the user to do something manually that you can do with your tools.
+7. If selection context is provided with the prompt, use it. If not, read the document to find the relevant content. Either way, ACT - do not ask.`;
     }
 
     if (isOpenClawModel && referenceFolders.length > 0) {
@@ -531,61 +419,8 @@ RULES:
       for (const folder of referenceFolders) {
         folderHint += `- ${folder}\n`;
       }
-      folderHint += "\nPrioritize these folders when searching for documents, exhibits, or supporting materials. You have full filesystem access — use it to read relevant files directly when the user\'s question relates to other documents.";
-      systemPromptOverride = `You are The Sidebar, an AI assistant embedded inside Microsoft Word via a task pane add-in. You are connected to the CURRENTLY OPEN Word document.
-
-CRITICAL RULES:
-1. The OPEN Word document must be read and edited ONLY through The Sidebar's HTTP API at http://localhost:3001. Do NOT use filesystem tools (python-docx, read, write, edit) to read or modify the .docx file. It is live in Word — you control it through HTTP calls.
-2. You DO have full filesystem access for everything else: reading reference documents, exhibits, research files, case folders, and any other supporting materials.
-3. The document context provided with each prompt reflects the CURRENT state of the open document.
-
-HOW TO USE THE SIDEBAR TOOLS:
-You are connected via OpenClaw. Use your exec tool to run curl commands against the API. Do NOT try to call these as native tool functions — they are HTTP endpoints. Examples:
-
-Read the full document:
-  curl -s http://localhost:3001/api/document
-
-Read a specific paragraph (index 5):
-  curl -s http://localhost:3001/api/paragraph?index=5
-
-Replace a paragraph:
-  curl -s -X POST http://localhost:3001/api/paragraph/replace -H "Content-Type: application/json" -d '{"index": 5, "text": "New paragraph text here"}'
-
-Find and replace:
-  curl -s -X POST http://localhost:3001/api/find-replace -H "Content-Type: application/json" -d '{"find": "old text", "replace": "new text"}'
-
-Insert text:
-  curl -s -X POST http://localhost:3001/api/insert -H "Content-Type: application/json" -d '{"text": "New text", "location": "end"}'
-
-Add a footnote:
-  curl -s -X POST http://localhost:3001/api/footnote -H "Content-Type: application/json" -d '{"paragraphIndex": 12, "text": "Footnote text"}'
-
-Read footnotes:
-  curl -s http://localhost:3001/api/footnotes
-
-Get document structure:
-  curl -s http://localhost:3001/api/document/structure
-
-IMPORTANT: Do NOT create new versions of the document. Do NOT use python-docx. Do NOT save files to disk. ALL edits go through the API above which modifies the document live in Word.
-
-BEHAVIORAL RULE: When the user asks you to check, fix, or correct something in the document, MAKE THE CHANGES YOURSELF. Do not tell the user to do it manually. Do not suggest they "update fields", "press F9", "regenerate the TOA", or perform any manual steps. You have full editing capability — use it. Report what you found AND fix it.
-
-EDITING SAFETY RULE: Do NOT use editSelection for ordinary document edits. It is selection-state dependent and can apply changes in the wrong location. Prefer replaceParagraph and findReplace for anchored, deterministic edits with cleaner Track Changes output. Use editSelection only when the user explicitly asks to edit the current selection and you have just verified it with readSelection.
-
-Available tools (HTTP endpoints at http://localhost:3001/api/):
-- READ: readDocument, readParagraph, readParagraphs, readSelection, getDocumentStats, getStructure, getToc, getDocumentProperties, getStyles, getStyleDetails, getBookmarks
-- EDIT: replaceParagraph, insertText, findReplace, find, deleteParagraph, batch, undo
-- FORMAT: formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, highlightText, setFontColor, setListFormat, insertBreak
-- FOOTNOTES: addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat
-- COMMENTS: addComment, getComments
-- TABLES: insertTable, readTable, getTables, updateTableCell, addTableRow, addTableColumn
-- HEADERS: getHeaderFooter, setHeaderFooter
-- PAGE: getPageSetup, setPageSetup
-- NAVIGATION: navigateTo, selectParagraph
-- TRACKING: getTrackedChanges, acceptTrackedChange, rejectTrackedChange
-- CITATIONS: markCitation, insertTableOfAuthorities, insertCrossReference, validateCrossReferences, checkToaPages
-
-To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/<endpoint> with JSON body parameters.` + folderHint;
+      folderHint += "\nPrioritize these folders when searching for documents, exhibits, or supporting materials. You have full filesystem access - use it to read relevant files directly when the user\'s question relates to other documents.";
+      systemPromptOverride = OPENCLAW_SYSTEM_PROMPT + folderHint;
     }
 
 
@@ -595,62 +430,15 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       if (systemPromptOverride) {
         systemPromptOverride += recapAddendum;
       } else {
-        systemPromptOverride = `You are The Sidebar, an AI assistant embedded inside Microsoft Word via a task pane add-in. You are connected to the CURRENTLY OPEN Word document.
-
-CRITICAL RULES:
-1. The OPEN Word document must be read and edited ONLY through The Sidebar's HTTP API at http://localhost:3001. Do NOT use filesystem tools (python-docx, read, write, edit) to read or modify the .docx file. It is live in Word — you control it through HTTP calls.
-2. You DO have full filesystem access for everything else: reading reference documents, exhibits, research files, case folders, and any other supporting materials.
-3. The document context provided with each prompt reflects the CURRENT state of the open document.
-
-HOW TO USE THE SIDEBAR TOOLS:
-You are connected via OpenClaw. Use your exec tool to run curl commands against the API. Do NOT try to call these as native tool functions — they are HTTP endpoints. Examples:
-
-Read the full document:
-  curl -s http://localhost:3001/api/document
-
-Read a specific paragraph (index 5):
-  curl -s http://localhost:3001/api/paragraph?index=5
-
-Replace a paragraph:
-  curl -s -X POST http://localhost:3001/api/paragraph/replace -H "Content-Type: application/json" -d '{"index": 5, "text": "New paragraph text here"}'
-
-Find and replace:
-  curl -s -X POST http://localhost:3001/api/find-replace -H "Content-Type: application/json" -d '{"find": "old text", "replace": "new text"}'
-
-Insert text:
-  curl -s -X POST http://localhost:3001/api/insert -H "Content-Type: application/json" -d '{"text": "New text", "location": "end"}'
-
-Add a footnote:
-  curl -s -X POST http://localhost:3001/api/footnote -H "Content-Type: application/json" -d '{"paragraphIndex": 12, "text": "Footnote text"}'
-
-Read footnotes:
-  curl -s http://localhost:3001/api/footnotes
-
-Get document structure:
-  curl -s http://localhost:3001/api/document/structure
-
-IMPORTANT: Do NOT create new versions of the document. Do NOT use python-docx. Do NOT save files to disk. ALL edits go through the API above which modifies the document live in Word.
-
-BEHAVIORAL RULE: When the user asks you to check, fix, or correct something in the document, MAKE THE CHANGES YOURSELF. Do not tell the user to do it manually. Do not suggest they "update fields", "press F9", "regenerate the TOA", or perform any manual steps. You have full editing capability — use it. Report what you found AND fix it.
-
-EDITING SAFETY RULE: Do NOT use editSelection for ordinary document edits. It is selection-state dependent and can apply changes in the wrong location. Prefer replaceParagraph and findReplace for anchored, deterministic edits with cleaner Track Changes output. Use editSelection only when the user explicitly asks to edit the current selection and you have just verified it with readSelection.
-
-Available tools (HTTP endpoints at http://localhost:3001/api/):
-- READ: readDocument, readParagraph, readParagraphs, readSelection, getDocumentStats, getStructure, getToc, getDocumentProperties, getStyles, getStyleDetails, getBookmarks
-- EDIT: replaceParagraph, insertText, findReplace, find, deleteParagraph, batch, undo
-- FORMAT: formatParagraph, setParagraphFormat, applyStyle, createStyle, modifyStyle, highlightText, setFontColor, setListFormat, insertBreak
-- FOOTNOTES: addFootnote, readFootnotes, getFootnoteBody, updateFootnote, deleteFootnote, insertFootnoteWithFormat
-- COMMENTS: addComment, getComments
-- TABLES: insertTable, readTable, getTables, updateTableCell, addTableRow, addTableColumn
-- HEADERS: getHeaderFooter, setHeaderFooter
-- PAGE: getPageSetup, setPageSetup
-- NAVIGATION: navigateTo, selectParagraph
-- TRACKING: getTrackedChanges, acceptTrackedChange, rejectTrackedChange
-- CITATIONS: markCitation, insertTableOfAuthorities, insertCrossReference, validateCrossReferences, checkToaPages
-
-To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/<endpoint> with JSON body parameters.` + recapAddendum;
+        systemPromptOverride = OPENCLAW_SYSTEM_PROMPT + recapAddendum;
       }
     }
+    // For OpenClaw models: if no systemPromptOverride has been set yet, use the base
+    // OpenClaw system prompt so memory/workspace/precedent appends land on the right foundation.
+    if (isOpenClawModel && !systemPromptOverride) {
+      systemPromptOverride = OPENCLAW_SYSTEM_PROMPT;
+    }
+
     // Inject learned memory into system prompt
     const memoryContext = buildMemoryContext(sessionId);
     if (memoryContext) {
@@ -670,35 +458,25 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       }
     }
 
+    // Inject standing orders — always last so they're hard to miss
+    const standingOrdersBlock = buildStandingOrdersBlock();
+    if (standingOrdersBlock) {
+      systemPromptOverride = (systemPromptOverride || "") + standingOrdersBlock;
+    }
+
     // Log what we're sending
     console.log(`[agent] Processing prompt for model="${model}" isOpenClaw=${isOpenClaw} systemPromptLen=${(systemPromptOverride||"").length} docContextLen=${documentContext.length}`);
 
-    // OpenClaw routing policy: hybrid deterministic + fuzzy gate between approach (1) and (2)
-    const trackModeOn = isTrackChangesEnabled();
-    const chosen = isOpenClaw ? chooseOpenClawEditApproach(entry.text || fullPrompt, trackModeOn) : null;
-
-    if (isOpenClaw && chosen?.approach === "filesystem") {
-      conversationHistory.push({ role: "user", content: fullPrompt, timestamp: Date.now() });
-      try {
-        const summary = await runOpenClawFilesystemEdit(entry, model, routerConfig, ws, abortController.signal);
-        fullResponse = summary || "Updated document via filesystem edit + reload.";
-      } catch (e: any) {
-        fullResponse = `OpenClaw filesystem edit failed: ${e?.message || "unknown error"}`;
-      }
-      conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)", timestamp: Date.now() });
-
-    } else {
-
-    // Show elapsed-time progress for OpenClaw (non-streaming, can take minutes)
-    let ocProgressInterval: ReturnType<typeof setInterval> | null = null;
+    // Show elapsed-time progress + per-call activity for OpenClaw (non-streaming)
     if (isOpenClaw) {
+      activeOcPromptId = entry.id; // enables activity middleware
       const ocStart = Date.now();
       ocProgressInterval = setInterval(() => {
         if (ws.readyState === 1 && !fullResponse) {
           const elapsed = Math.round((Date.now() - ocStart) / 1000);
           ws.send(JSON.stringify({ type: "prompt_progress", promptId: entry.id, text: `⌛ Working… (${elapsed}s)` }));
         }
-      }, 3000);
+      }, 5000); // less frequent now that we have per-call updates
     }
 
     for await (const chunk of runAgentLoop({
@@ -713,7 +491,6 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       onToolCall: (call) => {
         if (MODIFYING_TOOLS.has(call.name)) {
           modifyingCallCount++;
-          invalidateIndex();
         }
         (call as any)._startTime = Date.now();
         if (ws.readyState === 1) {
@@ -758,14 +535,15 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
     }
 
     if (ocProgressInterval) clearInterval(ocProgressInterval);
+    activeOcPromptId = null;
 
     // Track conversation history for non-OpenClaw models
     conversationHistory.push({ role: "user", content: fullPrompt, timestamp: Date.now() });
     conversationHistory.push({ role: "assistant", content: fullResponse || "(No response)", timestamp: Date.now() });
 
-    } // end else (non-OpenClaw agent loop)
 
-    // Memory extraction — learn from this exchange (async, non-blocking)
+
+    // Memory extraction - learn from this exchange (async, non-blocking)
     if (!isOpenClaw && fullResponse) {
       (async () => {
         try {
@@ -836,6 +614,19 @@ To call a tool, make an HTTP request (GET or POST) to http://localhost:3001/api/
       ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: safeResponse, timestamp: Date.now(), hasChanges, exchangeId: currentExchangeId, changeSummaries: changeSummaries.length > 0 ? changeSummaries : undefined }));
     }
   } catch (e: any) {
+    if (ocProgressInterval) clearInterval(ocProgressInterval);
+    activeOcPromptId = null;
+    if (currentAbortController === abortController) currentAbortController = null;
+    // If aborted by user, don't send an error response — the client already
+    // showed "Request cancelled" and cleared the thinking indicator.
+    const isAbort = abortController.signal.aborted ||
+      e?.message?.toLowerCase().includes("abort") ||
+      e?.name === "AbortError" ||
+      e?.code === "ABORT_ERR";
+    if (isAbort) {
+      console.log("[agent] Prompt aborted by user");
+      return;
+    }
     console.error("[agent] Error processing prompt:", e.message);
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({ type: "prompt_response", promptId: entry.id, text: `Error: ${e.message}`, timestamp: Date.now() }));
@@ -853,9 +644,6 @@ wss.on("connection", (ws: any) => {
   ws._wrAlive = true;
 
   ws.on("pong", () => { ws._wrAlive = true; });
-
-  // Auto-build document index when task pane connects
-  buildDocumentIndex().catch(e => console.error("[index] Auto-build failed:", e.message));
 
   ws.on("message", (raw: any) => {
     try {
@@ -957,8 +745,8 @@ Rules:
 - Each "find" must be an exact contiguous substring from SELECTED_TEXT.
 - Prefer short phrase replacements over full sentence rewrites.
 - Preserve legal meaning/tone.
-- Preserve all footnotes — never remove footnote reference numbers or their surrounding text. If a phrase contains a footnote marker, keep it in the replacement.
-- Preserve formatting — do not strip bold, italic, or other inline markup.
+- Preserve all footnotes - never remove footnote reference numbers or their surrounding text. If a phrase contains a footnote marker, keep it in the replacement.
+- Preserve formatting - do not strip bold, italic, or other inline markup.
 - Use smart quotes only.
 - No markdown, no commentary, JSON only.
 
@@ -1011,7 +799,7 @@ function apiHandler(command: string, extractParams?: (req: express.Request) => a
 // Health & Meta
 app.get("/api/status", (_req, res) => {
   res.json({ ok: true, data: {
-    version: VERSION, uptime: process.uptime(), 
+    version: VERSION, uptime: process.uptime(),
     connected: taskPaneWs !== null && taskPaneWs.readyState === WebSocket.OPEN,
     pendingCommands: pending.size, promptQueueSize: promptQueue.length,
   }});
@@ -1195,15 +983,6 @@ app.get("/api/index/range", apiHandler("getIndexRange", (req) => ({ from: req.qu
 app.post("/api/index/delta", apiHandler("getDelta"));
 
 // Force refresh server-side document index
-app.post("/api/index/refresh", async (_req, res) => {
-  try {
-    const idx = await buildDocumentIndex();
-    res.json({ ok: true, data: { paragraphCount: idx?.paragraphs.length || 0, hash: idx?.hash || "" } });
-  } catch (e: any) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
 // Document
 app.get("/api/document", apiHandler("getDocument"));
 app.get("/api/document/paragraphs", apiHandler("getParagraphs", (req) => ({ from: req.query.from ? parseInt(req.query.from as string, 10) : undefined, to: req.query.to ? parseInt(req.query.to as string, 10) : undefined, compact: req.query.compact === "true" })));
@@ -1305,9 +1084,58 @@ app.get("/api/footnotes/detailed", apiHandler("reorderFootnotes"));
 app.post("/api/citation/mark", apiHandler("markCitation"));
 app.post("/api/citation/toa", apiHandler("insertTableOfAuthorities"));
 
+// ── Batch Citation Marking ──
+// Accepts { citations: [{ shortCite, longCite, category?, searchText? }] }
+// and marks them one-by-one, returning a results array.
+app.post("/api/citation/mark-batch", async (req, res) => {
+  const { citations } = req.body || {};
+  if (!Array.isArray(citations) || citations.length === 0) {
+    return res.status(400).json({ ok: false, error: "citations must be a non-empty array" });
+  }
+  const results: { shortCite: string; ok: boolean; error?: string }[] = [];
+  for (const cite of citations) {
+    try {
+      const r = await sendCommand("markCitation", {
+        shortCite: cite.shortCite,
+        longCite: cite.longCite,
+        category: cite.category ?? 1,
+        searchText: cite.searchText,
+      }, 15000);
+      results.push({ shortCite: cite.shortCite, ok: true, ...r });
+    } catch (e: any) {
+      results.push({ shortCite: cite.shortCite, ok: false, error: e?.message || "unknown error" });
+    }
+  }
+  const succeeded = results.filter(r => r.ok).length;
+  res.json({ ok: true, data: { total: citations.length, succeeded, failed: citations.length - succeeded, results } });
+});
+
 // ── Cross-References ──
 app.post("/api/cross-reference", apiHandler("insertCrossReference"));
 app.get("/api/cross-references/validate", apiHandler("validateCrossReferences"));
+
+// ── Web Research ──────────────────────────────────────────────────────────
+app.post("/api/web/search", async (req, res) => {
+  try {
+    const { query, count = 5 } = req.body;
+    if (!query) { res.json({ ok: false, error: "query required" }); return; }
+    const data = await webSearch(String(query), Number(count));
+    res.json({ ok: true, data });
+  } catch (e: any) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/web/fetch", async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) { res.json({ ok: false, error: "url required" }); return; }
+    const data = await webFetch(String(url));
+    res.json({ ok: true, data });
+  } catch (e: any) {
+    res.json({ ok: false, error: e.message });
+  }
+});
 
 // ── Revert Endpoint ──
 app.post("/api/revert/:exchangeId", async (req: express.Request, res: express.Response) => {
@@ -1434,6 +1262,53 @@ server.listen(PORT, "127.0.0.1", () => {
 
 // ── Settings ──
 app.get("/api/settings", handleGetSettings());
+
+// ── Standing Orders API ──
+app.get("/api/standing-orders", (_req, res) => {
+  const config = readConfig();
+  res.json({ ok: true, data: config.standingOrders || [] });
+});
+
+app.post("/api/standing-orders", (req, res) => {
+  const { orders } = req.body || {};
+  if (!Array.isArray(orders)) return res.status(400).json({ ok: false, error: "orders must be an array" });
+  const config = readConfig();
+  config.standingOrders = orders as StandingOrder[];
+  writeConfig(config);
+  res.json({ ok: true, data: config.standingOrders });
+});
+
+app.post("/api/standing-orders/add", (req, res) => {
+  const { text } = req.body || {};
+  if (!text?.trim()) return res.status(400).json({ ok: false, error: "text required" });
+  const config = readConfig();
+  const orders = config.standingOrders || [];
+  const order: StandingOrder = { id: Date.now().toString(36), text: text.trim(), enabled: true };
+  orders.push(order);
+  config.standingOrders = orders;
+  writeConfig(config);
+  res.json({ ok: true, data: order });
+});
+
+app.patch("/api/standing-orders/:id", (req, res) => {
+  const config = readConfig();
+  const orders = config.standingOrders || [];
+  const idx = orders.findIndex(o => o.id === req.params.id);
+  if (idx < 0) return res.status(404).json({ ok: false, error: "order not found" });
+  orders[idx] = { ...orders[idx], ...req.body };
+  config.standingOrders = orders;
+  writeConfig(config);
+  res.json({ ok: true, data: orders[idx] });
+});
+
+app.delete("/api/standing-orders/:id", (req, res) => {
+  const config = readConfig();
+  const before = (config.standingOrders || []).length;
+  config.standingOrders = (config.standingOrders || []).filter(o => o.id !== req.params.id);
+  writeConfig(config);
+  res.json({ ok: true, data: { deleted: before - config.standingOrders.length } });
+});
+
 app.post("/api/settings", (req, res, next) => {
   // Wrap handlePostSettings to trigger rescan when referenceFolders change
   const handler = handlePostSettings();
@@ -1477,7 +1352,6 @@ app.post("/api/openclaw/test", async (req, res) => {
   }
 });
 // ── Document Reload (via AppleScript, Mac only) ──
-// After python-docx edits the .docx on disk, call this to make Word reopen it.
 app.post("/api/document/reload", async (req, res) => {
   const { execSync } = require("child_process");
   try {
@@ -1529,7 +1403,7 @@ app.post("/api/export/pdf", async (req, res) => {
     if (fs.existsSync(outPath)) {
       res.json({ ok: true, data: { path: outPath, size: fs.statSync(outPath).size } });
     } else {
-      res.json({ ok: false, error: "PDF export may have failed — file not found. Check Word for dialogs." });
+      res.json({ ok: false, error: "PDF export may have failed - file not found. Check Word for dialogs." });
     }
   } catch (e: any) {
     res.status(500).json({ ok: false, error: `PDF export failed: ${e.message}` });
@@ -1630,7 +1504,7 @@ app.post("/api/toa/check", async (_req, res) => {
       text: p.text.substring(0, 2000) + (p.text.length > 2000 ? "..." : "")
     }));
 
-    // Step 4: Return everything — let the caller send to LLM
+    // Step 4: Return everything - let the caller send to LLM
     res.json({
       ok: true,
       data: {

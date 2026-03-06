@@ -2,7 +2,7 @@
 
 **Connect your AI to Microsoft Word.** Open source, model-agnostic, runs entirely on your machine.
 
-Use [OpenClaw](https://openclaw.ai), OpenAI, Anthropic, Ollama, LM Studio — or any OpenAI-compatible API — as a fully autonomous document editor inside Word. 55+ tools. Your keys. Your data. Nothing leaves your machine.
+Use [OpenClaw](https://openclaw.ai), OpenAI, Anthropic, Ollama, LM Studio — or any OpenAI-compatible API — as a fully autonomous document editor inside Word. 60+ tools including live web research. Your keys. Your data. Nothing leaves your machine.
 
 Built by a litigation partner who uses it daily.
 
@@ -22,6 +22,8 @@ Point The Sidebar at your OpenClaw gateway (`http://localhost:18789`) and your a
 **Two-track editing** — The agent automatically picks the right approach:
 - **Sidebar API** for surgical edits (fix a typo, add a footnote, find/replace)
 - **python-docx + reload** for bulk operations (rewrite a section, restructure the document) — edits the .docx directly, then tells Word to refresh via `POST /api/document/reload`
+
+**Web research built in** — The Sidebar can search the web and fetch URLs without leaving Word. Ask it to find market data, verify a quote, look up a case summary, or pull manufacturer representations — and it inserts the results with source footnotes automatically.
 
 **Not using OpenClaw?** No problem. The Sidebar works standalone with any LLM provider.
 
@@ -59,6 +61,7 @@ Microsoft Copilot costs $30/month, locks you into one model, and can't even add 
 - **Citations** — mark TA fields, insert Table of Authorities
 - **Cross-references** — insert and validate
 - **Page/section breaks**, lists, bookmarks, highlighting, font colors, paragraph formatting
+- **Web research** — `webSearch` and `webFetch` tools let the AI search the web and read URLs mid-document, inserting sourced content with footnotes
 
 ### ⚡ Quick Actions
 - **One-click legal tools** — Cite Check, Long/Short Cites, TOA Pages, Defined Terms, House Style, Risk Analysis, and more
@@ -81,7 +84,7 @@ Microsoft Copilot costs $30/month, locks you into one model, and can't even add 
 - **Stop button** — cancel in-flight requests instantly, with real abort signal propagation that kills the underlying HTTP request
 - **Async OpenClaw mode** — long-running agent tasks stream results progressively instead of blocking, with no timeout (runs until done or stopped)
 - **Elapsed timer** — see how long the model has been thinking, with ⌛ progress counter for OpenClaw
-- **Completion indicator** — red ■ Done badge on every response so you know when the AI has finished
+- **Completion indicator** — red ■ Done badge at both the top and bottom of long tool chains, auto-scrolls into view when the agent finishes
 
 ### ✏️ Editing Experience
 - **Track Changes / YOLO mode** — toggle between tracked changes and direct edits, synced with Word's actual state

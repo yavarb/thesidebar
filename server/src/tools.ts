@@ -743,7 +743,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: "function",
     function: {
       name: "markCitation",
-      description: "Mark a citation for Table of Authorities. Inserts a TA field code at the specified text. Categories: 1=Cases, 2=Statutes, 3=Other Authorities, 4=Rules.",
+      description: "Mark a single citation for Table of Authorities. Inserts a TA field code at the specified text. Categories: 1=Cases, 2=Statutes, 3=Other Authorities, 4=Rules. For marking many citations at once, prefer markCitations (plural).",
       parameters: {
         type: "object",
         properties: {
@@ -759,6 +759,33 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "markCitations",
+      description: "Mark multiple citations for Table of Authorities in a single call. Use this instead of calling markCitation repeatedly. Pass all citations you have identified at once. Categories: 1=Cases, 2=Statutes, 3=Other Authorities, 4=Rules.",
+      parameters: {
+        type: "object",
+        properties: {
+          citations: {
+            type: "array",
+            description: "Array of citations to mark",
+            items: {
+              type: "object",
+              properties: {
+                shortCite: { type: "string", description: "Short citation form (e.g., 'Smith v. Jones')" },
+                longCite: { type: "string", description: "Full citation (e.g., 'Smith v. Jones, 123 F.3d 456 (2d Cir. 2020)')" },
+                category: { type: "number", description: "1=Cases, 2=Statutes, 3=Other, 4=Rules (default: 1)" },
+                searchText: { type: "string", description: "Text to find in document (default: shortCite)" },
+              },
+              required: ["shortCite", "longCite"],
+            },
+          },
+        },
+        required: ["citations"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "insertTableOfAuthorities",
       description: "Insert a Table of Authorities at a position in the document.",
       parameters: {
@@ -767,6 +794,37 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           category: { type: "number", description: "Category to include (0=all, 1=Cases, 2=Statutes, 3=Other, 4=Rules). Default: 0" },
           paragraphIndex: { type: "number", description: "Paragraph index to insert after (default: end of document)" },
         },
+      },
+    },
+  },
+
+  // ═══ Web Research ═══
+  {
+    type: "function",
+    function: {
+      name: "webSearch",
+      description: "Search the web for information. Returns titles, URLs, and snippets for top results. Use for factual research, finding sources, looking up cases, market data, or news.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query" },
+          count: { type: "number", description: "Number of results to return (1-10, default 5)" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "webFetch",
+      description: "Fetch and read the full content of a web page. Returns clean readable text extracted from the page. Use to read articles, verify quotes, check sources, or extract data from a specific URL.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "Full URL to fetch (must start with http:// or https://)" },
+        },
+        required: ["url"],
       },
     },
   },
@@ -876,6 +934,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       parameters: { type: "object", properties: {} },
     },
   },
+
 ];
 
 
@@ -985,7 +1044,12 @@ export const TOOL_ENDPOINTS: Record<string, ToolEndpoint> = {
 
   // Citations / TOA
   markCitation: { method: "POST", path: "/api/citation/mark", mapArgs: (args) => ({ path: "/api/citation/mark", body: args }) },
+  markCitations: { method: "POST", path: "/api/citation/mark-batch", mapArgs: (args) => ({ path: "/api/citation/mark-batch", body: args }) },
   insertTableOfAuthorities: { method: "POST", path: "/api/citation/toa", mapArgs: (args) => ({ path: "/api/citation/toa", body: args }) },
+
+  // Web Research
+  webSearch: { method: "POST", path: "/api/web/search", mapArgs: (args) => ({ path: "/api/web/search", body: args }) },
+  webFetch: { method: "POST", path: "/api/web/fetch", mapArgs: (args) => ({ path: "/api/web/fetch", body: args }) },
 
   // Cross-References
   insertCrossReference: { method: "POST", path: "/api/cross-reference", mapArgs: (args) => ({ path: "/api/cross-reference", body: args }) },

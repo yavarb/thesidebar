@@ -16,6 +16,13 @@ export interface LocalEndpointConfig {
   baseUrl: string;
 }
 
+/** A standing order — a persistent rule injected into every system prompt */
+export interface StandingOrder {
+  id: string;
+  text: string;
+  enabled: boolean;
+}
+
 /** Full configuration stored on disk */
 export interface SidebarConfig {
   /** OpenClaw gateway URL (e.g., "http://10.0.0.58:18789") */
@@ -40,6 +47,8 @@ export interface SidebarConfig {
   workspacePath?: string;
   /** Precedent folder — example documents the model should reference for style/format */
   precedentPath?: string;
+  /** Standing orders — persistent rules injected into every system prompt */
+  standingOrders?: StandingOrder[];
 }
 
 /** Sensitive field names that should be masked in GET responses */

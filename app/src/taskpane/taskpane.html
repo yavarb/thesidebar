@@ -884,50 +884,123 @@
       line-height: 1.6;
     }
 
-    /* ===== Quick Actions Bar ===== */
-    .quick-actions-bar {
-      display: flex;
-      gap: 6px;
-      padding: 6px 12px;
-      overflow: visible;
-      flex-shrink: 0;
-      flex-wrap: wrap;
+    /* ===== Presets Panel ===== */
+    .presets-panel {
+      position: absolute;
+      bottom: 100%;
+      left: 0; right: 0;
+      background: var(--settings-bg);
       border-top: 1px solid var(--border-color);
-      scrollbar-width: none;
+      border-radius: 12px 12px 0 0;
+      box-shadow: 0 -4px 16px rgba(0,0,0,0.12);
+      z-index: 50;
+      max-height: 320px;
+      display: flex;
+      flex-direction: column;
+      animation: slideUp 0.15s ease-out;
     }
-    .quick-actions-bar::-webkit-scrollbar { display: none; }
-    .qa-pill {
-      font-size: 11px;
-      padding: 4px 10px;
-      border-radius: 12px;
-      border: 1px solid var(--border-color);
-      background: var(--bg-primary);
+    .presets-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px 8px;
+      border-bottom: 1px solid var(--border-color);
+      font-size: 12px;
+      font-weight: 600;
       color: var(--text-secondary);
+      flex-shrink: 0;
+    }
+    .presets-panel-close {
       cursor: pointer;
-      white-space: nowrap;
-      transition: all 0.15s;
-      position: relative;
-      user-select: none;
+      font-size: 14px;
+      color: var(--text-secondary);
+      padding: 2px 4px;
+      border-radius: 4px;
+      line-height: 1;
     }
-    .qa-pill:hover, .qa-pill.active {
-      background: var(--accent);
-      color: white;
-      border-color: var(--accent);
-    }
-    .qa-dropdown {
-      display: none;
-      position: fixed;
-      z-index: 1000;
-      background: var(--bg-primary);
-      border: 1px solid var(--border-color);
-      border-radius: 8px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-      min-width: 200px;
-      max-width: 280px;
-      z-index: 100;
+    .presets-panel-close:hover { background: var(--bg-tertiary); }
+    .presets-list {
+      overflow-y: auto;
+      flex: 1;
       padding: 4px 0;
     }
-    .qa-dropdown.visible { display: block; }
+    .presets-list::-webkit-scrollbar { width: 4px; }
+    .presets-list::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 2px; }
+    .presets-empty {
+      padding: 18px 14px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      text-align: center;
+      font-style: italic;
+    }
+    .preset-row {
+      display: flex;
+      align-items: center;
+      padding: 7px 14px;
+      gap: 8px;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    .preset-row:hover { background: var(--bg-tertiary, #f0f0f0); }
+    .preset-row-name {
+      flex: 1;
+      font-size: 12px;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .preset-row-icons {
+      display: flex;
+      gap: 2px;
+      flex-shrink: 0;
+      opacity: 0;
+      transition: opacity 0.1s;
+    }
+    .preset-row:hover .preset-row-icons { opacity: 1; }
+    .preset-icon-btn {
+      font-size: 11px;
+      padding: 2px 5px;
+      border-radius: 4px;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .preset-icon-btn:hover { background: var(--bg-secondary); }
+    .preset-icon-btn.del:hover { background: var(--remove-hover-bg); }
+    .presets-add-row {
+      padding: 8px 14px;
+      font-size: 11px;
+      color: var(--accent-highlight);
+      cursor: pointer;
+      border-top: 1px solid var(--border-color);
+      flex-shrink: 0;
+    }
+    .presets-add-row:hover { text-decoration: underline; }
+    /* Standing order toggle */
+    .order-toggle {
+      flex-shrink: 0;
+      width: 28px; height: 16px;
+      border-radius: 8px;
+      background: var(--border-color);
+      position: relative;
+      cursor: pointer;
+      transition: background 0.2s;
+      border: none;
+      outline: none;
+      padding: 0;
+    }
+    .order-toggle::after {
+      content: "";
+      position: absolute;
+      top: 2px; left: 2px;
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      background: #fff;
+      transition: transform 0.2s;
+    }
+    .order-toggle.on { background: var(--accent-highlight); }
+    .order-toggle.on::after { transform: translateX(12px); }
+    .preset-row.disabled .preset-row-name { opacity: 0.4; text-decoration: line-through; }
     .qa-action {
       padding: 6px 12px;
       font-size: 12px;
@@ -1101,25 +1174,53 @@
     </div>
 
 
-    <div class="quick-actions-bar" id="quick-actions-bar"></div>
-
+    <!-- Standing Orders Editor Modal -->
+    <div class="qa-modal-overlay" id="orders-modal-overlay">
+      <div class="qa-modal">
+        <h4 id="orders-modal-title">New Standing Order</h4>
+        <label>Rule</label>
+        <textarea id="orders-modal-text" placeholder="e.g. Always footnote sources with working hyperlinks" style="min-height:80px;"></textarea>
+        <div class="qa-vars-hint">This rule will be injected into every prompt as a non-negotiable instruction.</div>
+        <div class="qa-modal-actions">
+          <button class="btn-cancel" id="orders-modal-cancel">Cancel</button>
+          <button class="btn-save" id="orders-modal-save">Save</button>
+        </div>
+      </div>
+    </div>
     <!-- Prompt Editor Modal -->
     <div class="qa-modal-overlay" id="qa-modal-overlay">
       <div class="qa-modal">
-        <h4 id="qa-modal-title">Edit Prompt</h4>
+        <h4 id="qa-modal-title">Edit Preset</h4>
         <label>Name</label>
-        <input type="text" id="qa-modal-name" placeholder="Action name" />
+        <input type="text" id="qa-modal-name" placeholder="Preset name" />
         <label>Prompt</label>
         <textarea id="qa-modal-prompt" placeholder="Enter prompt text..."></textarea>
         <div class="qa-vars-hint">Variables: <code>{{selection}}</code> = selected text, <code>{{document}}</code> = full document context (auto-included)</div>
         <div class="qa-modal-actions">
-          <button class="btn-reset" id="qa-modal-reset" style="display:none;">Reset to Default</button>
           <button class="btn-cancel" id="qa-modal-cancel">Cancel</button>
           <button class="btn-save" id="qa-modal-save">Save</button>
         </div>
       </div>
     </div>
-    <div class="input-area">
+    <div class="input-area" style="position:relative;">
+      <!-- Standing Orders Panel -->
+      <div class="presets-panel" id="orders-panel" style="display:none;">
+        <div class="presets-panel-header">
+          <span>📌 Standing Orders</span>
+          <span class="presets-panel-close" id="orders-panel-close">✕</span>
+        </div>
+        <div class="presets-list" id="orders-list"></div>
+        <div class="presets-add-row" id="orders-add-btn">＋ New standing order</div>
+      </div>
+      <!-- Presets Panel (shown above input area) -->
+      <div class="presets-panel" id="presets-panel" style="display:none;">
+        <div class="presets-panel-header">
+          <span>Presets</span>
+          <span class="presets-panel-close" id="presets-panel-close">✕</span>
+        </div>
+        <div class="presets-list" id="presets-list"></div>
+        <div class="presets-add-row" id="presets-add-btn">＋ New preset</div>
+      </div>
       <div class="input-controls" style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
         <span class="settings-gear" id="settings-toggle" title="Settings" style="cursor:pointer;font-size:15px;opacity:0.5;transition:opacity 0.2s;">⚙️</span>
         <div class="model-pill">
@@ -1129,6 +1230,8 @@
         </div>
         <button class="mode-toggle" id="mode-toggle" title="Toggle Track Changes">⚡ YOLO</button>
         <button class="tighten-btn" id="tighten-btn" title="Tighten selected text — cut words, keep substance">✂️ Tighten</button>
+        <button class="mode-toggle" id="presets-toggle-btn" title="Presets">☰ Presets</button>
+        <button class="mode-toggle" id="orders-toggle-btn" title="Standing Orders — persistent rules applied to every response">📌 Orders</button>
         <span class="tray-icon" id="workspace-tray" title="Workspace: not set" style="cursor:pointer;font-size:13px;opacity:0.4;transition:opacity 0.2s;">📂</span>
         <span class="tray-icon" id="precedent-tray" title="Precedent: not set" style="cursor:pointer;font-size:13px;opacity:0.4;transition:opacity 0.2s;">📑</span>
         <span class="tray-icon" id="memory-tray" title="Memory: 0 items" style="cursor:pointer;font-size:13px;opacity:0.4;transition:opacity 0.2s;">🧠</span>

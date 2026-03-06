@@ -5,11 +5,15 @@
  * Dynamically queries model context sizes from API endpoints,
  * caches results, and manages conversation history to fit within
  * a configurable budget of the context window.
+ *
+ * When compaction is needed, uses the LLM to generate a concise
+ * summary of dropped messages so important context is preserved.
  */
 
 import http from "http";
 import https from "https";
 import { URL } from "url";
+import { routePrompt, RouterConfig } from "./llm-router";
 
 // ── Defaults ──
 
@@ -226,12 +230,30 @@ export interface ManagedContext {
  * @param documentContext - Current document text (to account for its token usage)
  * @param contextBudgetPercent - Percentage of context window for history (default 40)
  */
-export function manageContext(
+/** Configuration for LLM-based compaction */
+export interface CompactionConfig {
+  model: string;
+  routerConfig: RouterConfig;
+}
+
+/**
+ * Manage conversation history to fit within the context budget.
+ * When compaction is needed, uses the LLM to generate a concise summary
+ * of dropped messages so important context is preserved.
+ *
+ * @param history - Full conversation history
+ * @param contextSize - Model's total context window in tokens
+ * @param documentContext - Current document text (to account for its token usage)
+ * @param contextBudgetPercent - Percentage of context window for history (default 40)
+ * @param compactionConfig - Model/router config for LLM-based summarization
+ */
+export async function manageContext(
   history: { role: string; content: string }[],
   contextSize: number,
   documentContext?: string,
   contextBudgetPercent: number = DEFAULT_CONTEXT_BUDGET_PERCENT,
-): ManagedContext {
+  compactionConfig?: CompactionConfig,
+): Promise<ManagedContext> {
   if (history.length === 0) {
     return { messages: [], compactedCount: 0, estimatedTokens: 0 };
   }
@@ -270,11 +292,15 @@ export function manageContext(
 
   const kept = history.slice(cutoff);
   const dropped = history.slice(0, cutoff);
-
-  // v1: Simple truncation summary
-  // Future: call LLM to generate a proper summary
   const summaryBudget = Math.floor(availableTokens * 0.15);
-  const summary = buildSimpleSummary(dropped, summaryBudget);
+
+  // Use LLM to summarize if config provided, otherwise fall back to simple truncation
+  let summary: string;
+  if (compactionConfig && dropped.length >= 2) {
+    summary = await llmSummarize(dropped, summaryBudget, compactionConfig);
+  } else {
+    summary = buildSimpleSummary(dropped, summaryBudget);
+  }
 
   const result: { role: string; content: string }[] = [];
   if (summary) {
@@ -290,8 +316,61 @@ export function manageContext(
 }
 
 /**
+ * Use the LLM to generate a concise summary of compacted messages.
+ * Falls back to simple truncation on error.
+ */
+async function llmSummarize(
+  messages: { role: string; content: string }[],
+  maxTokens: number,
+  config: CompactionConfig,
+): Promise<string> {
+  try {
+    // Build a transcript of the dropped messages for the LLM
+    const maxInputChars = 12000; // cap input to avoid expensive summarization calls
+    let transcript = "";
+    for (const msg of messages) {
+      const prefix = msg.role === "user" ? "User: " : "Assistant: ";
+      const line = prefix + msg.content.replace(/\n+/g, " ").slice(0, 800) + "\n";
+      if (transcript.length + line.length > maxInputChars) {
+        transcript += "...[truncated]\n";
+        break;
+      }
+      transcript += line;
+    }
+
+    const maxChars = maxTokens * 4;
+    const prompt = `Summarize this conversation excerpt in ${maxChars} characters or less. Focus on: what the user asked for, what edits were made to the document, any decisions or preferences expressed, and any unresolved items. Be concise and factual — this summary will be injected as context for a continuing conversation.
+
+Conversation:
+${transcript}`;
+
+    let result = "";
+    for await (const chunk of routePrompt(prompt, config.model, { messages: [] }, config.routerConfig)) {
+      try {
+        const p = JSON.parse(chunk);
+        if (p?.type) continue;
+      } catch {}
+      result += chunk;
+    }
+
+    if (result.trim()) {
+      const header = "Summary of earlier conversation:\n\n";
+      let summary = result.trim();
+      if (summary.length > maxChars) summary = summary.substring(0, maxChars) + "...";
+      console.log(`[context] LLM compaction: ${messages.length} messages → ${summary.length} char summary`);
+      return header + summary;
+    }
+  } catch (e: any) {
+    console.error(`[context] LLM compaction failed, using fallback:`, e.message);
+  }
+
+  // Fallback to simple truncation
+  return buildSimpleSummary(messages, maxTokens);
+}
+
+/**
  * Build a simple summary of compacted messages by concatenating and truncating.
- * v1 approach — a future version could call the LLM to summarize.
+ * Used as fallback when LLM summarization is unavailable or fails.
  */
 function buildSimpleSummary(
   messages: { role: string; content: string }[],
@@ -299,7 +378,7 @@ function buildSimpleSummary(
 ): string {
   if (messages.length === 0) return "";
 
-  const header = "Earlier in this conversation, the user and assistant discussed:\n\n";
+  const header = "Summary of earlier conversation:\n\n";
   const maxChars = (maxTokens - estimateTokens(header)) * 4;
 
   if (maxChars <= 100) {

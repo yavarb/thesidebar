@@ -159,8 +159,8 @@ function addThinkingIndicator(): HTMLElement {
   return el;
 }
 
-function removeThinkingIndicator(): void {
-  setQueryInProgress(false);
+function removeThinkingIndicator(keepStopButton = false): void {
+  if (!keepStopButton) setQueryInProgress(false);
   if (thinkingTimerInterval) { clearInterval(thinkingTimerInterval); thinkingTimerInterval = null; }
   const el = document.getElementById("thinking-indicator");
   if (el) el.remove();
@@ -251,7 +251,8 @@ Office.onReady((info) => {
     setupTrackChangesToggle();
     setupRefStatus();
     setupTrayIcons();
-  setupQuickActions();
+  setupPresetsPanel();
+  setupStandingOrdersPanel();
     connectWebSocket();
     // Initialize document session after WebSocket connects
     setTimeout(() => initSession(), 1000);
@@ -763,7 +764,9 @@ function connectWebSocket() {
         // Update or create streaming entry — use plain text during streaming for speed
         let streamEl = history.querySelector(`[data-streaming-for="${promptId}"]`) as HTMLElement | null;
         if (!streamEl) {
-          removeThinkingIndicator();
+          // Keep stop button active while streaming — response isn't final yet.
+          // Only remove the spinner DOM; setQueryInProgress(false) happens on prompt_response.
+          removeThinkingIndicator(true);
           streamEl = document.createElement("div");
           streamEl.className = "chat-entry chat-assistant";
           streamEl.setAttribute("data-streaming-for", String(promptId));
@@ -850,6 +853,14 @@ function connectWebSocket() {
               if (container) {
                 // Mark all lines as complete
                 container.querySelectorAll(".tool-progress-line:not(.complete)").forEach(l => l.classList.add("complete"));
+                // Add a "Done" summary badge at the top of the tool list
+                const toolCount = container.querySelectorAll(".tool-progress-line").length;
+                if (toolCount > 4) {
+                  const topDone = document.createElement("div");
+                  topDone.className = "tool-done-summary";
+                  topDone.innerHTML = `<span class="done-dot">■</span> Done &mdash; ${toolCount} tool call${toolCount !== 1 ? "s" : ""}`;
+                  container.insertBefore(topDone, container.firstChild);
+                }
                 el.appendChild(container);
               }
             }
@@ -909,10 +920,19 @@ function connectWebSocket() {
 
             userEl.insertAdjacentElement("afterend", el);
             inserted = true;
+
+            // Scroll to Done indicator after DOM renders
+            requestAnimationFrame(() => {
+              doneEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            });
           }
         }
         if (!inserted) appendChatEntry("assistant", responseText);
-        history.scrollTop = history.scrollHeight;
+        if (inserted) {
+          // scrollIntoView handles it above
+        } else {
+          history.scrollTop = history.scrollHeight;
+        }
         return;
       }
       if (msg.id !== undefined && msg.command) {
@@ -1218,14 +1238,23 @@ async function handleCommand(command: string, params: any): Promise<any> {
         for (const e of edits) {
           const find = (e?.find || "").trim();
           const replace = normalizeSmartQuotes((e?.replace || "").trim());
-          if (!find) continue;
-          const hits = p.search(find, { matchCase: true });
-          hits.load("items");
-          await ctx.sync();
-          if (hits.items.length === 0) continue;
-          hits.items[0].insertText(replace, Word.InsertLocation.replace);
-          await ctx.sync();
-          applied++;
+          // Guard: skip edits that are empty, too long, or contain chars Word can't search.
+          // Word throws SearchStringInvalidOrTooLong for >~255 chars, newlines, and some
+          // special characters. Wrap in try/catch as the full set of invalid inputs is
+          // undocumented — skip gracefully rather than crash.
+          if (!find || find.length > 220 || find.includes("\n") || find.includes("\r")) continue;
+          try {
+            const hits = p.search(find, { matchCase: true });
+            hits.load("items");
+            await ctx.sync();
+            if (hits.items.length === 0) continue;
+            hits.items[0].insertText(replace, Word.InsertLocation.replace);
+            await ctx.sync();
+            applied++;
+          } catch {
+            // Word rejected this search string — skip and continue with remaining edits
+            continue;
+          }
         }
 
         p.load("text");
@@ -1371,6 +1400,7 @@ async function handleCommand(command: string, params: any): Promise<any> {
       return Word.run(async (ctx) => {
         const searchText: string = params?.text;
         if (!searchText) throw new Error("params.text required");
+        if (searchText.length > 220) throw new Error(`Search string too long (${searchText.length} chars). Word's search API has a ~255 char limit.`);
         const results = ctx.document.body.search(searchText, { matchCase: params?.matchCase ?? false, matchWholeWord: params?.matchWholeWord ?? false });
         results.load("items"); await ctx.sync();
         results.load("text,style"); await ctx.sync();
@@ -1381,6 +1411,7 @@ async function handleCommand(command: string, params: any): Promise<any> {
       return Word.run(async (ctx) => {
         const { text, replacement, matchCase, matchWholeWord } = params || {};
         if (!text || replacement === undefined) throw new Error("text and replacement required");
+        if (text.length > 220) throw new Error(`Search string too long (${text.length} chars). Word's search API has a ~255 char limit. Use replaceParagraph instead.`);
         if (trackChangesMode && (text.length > 160 || text.includes("\n"))) {
           throw new Error("Track mode blocks broad find/replace. Use smaller phrase-level replacements.");
         }
@@ -2120,30 +2151,64 @@ async function handleCommand(command: string, params: any): Promise<any> {
       return Word.run(async (ctx) => {
         const { shortCite, longCite, category, searchText } = params || {};
         if (!shortCite || !longCite) throw new Error("shortCite and longCite required");
-        // Category: 1=Cases, 2=Statutes, 3=Other Authorities, 4=Rules
         const cat = category || 1;
-        // Find the text to mark
-        const anchor = searchText || shortCite;
-        const results = ctx.document.body.search(anchor, { matchCase: true });
-        results.load("items");
-        await ctx.sync();
-        if (results.items.length === 0) throw new Error(`Text "${anchor}" not found in document`);
-        // Insert TA field code: { TA \l "longCite" \s "shortCite" \c category }
+        // Word's search API rejects strings longer than ~255 chars or with special chars.
+        // Truncate to a safe length and strip characters that break the search engine.
+        const sanitizeAnchor = (s: string) => s.replace(/[^\w\s,.\-–—;:'"()\[\]]/g, "").trim().slice(0, 200);
+        const anchor = sanitizeAnchor(searchText || shortCite);
+        if (!anchor) throw new Error(`Citation anchor too short or all special chars: "${shortCite}"`);
         const fieldCode = `TA \\l "${longCite}" \\s "${shortCite}" \\c ${cat}`;
-        const range = results.items[0].getRange(Word.RangeLocation.end);
-        range.insertText(" ", Word.InsertLocation.after);
-        const fieldRange = range.getRange(Word.RangeLocation.after);
-        try {
-          fieldRange.insertField(Word.InsertLocation.end, Word.FieldType.empty, fieldCode, true);
+
+        async function insertTA(range: Word.Range): Promise<void> {
+          // Insert the TA field directly at the end of the found range — no leading
+          // space. TA fields are hidden text; any visible space before them shows up
+          // as a gap in the document.
+          const endRange = range.getRange(Word.RangeLocation.end);
+          try {
+            endRange.insertField(Word.InsertLocation.after, Word.FieldType.empty, fieldCode, true);
+          } catch {
+            // Fallback: insertField not available — insert as hidden-style text marker
+            // (wrap in braces so it's visually distinct if shown)
+            endRange.insertText(`\u200B{${fieldCode}}\u200B`, Word.InsertLocation.after);
+          }
           await ctx.sync();
-          return { success: true, shortCite, longCite, category: cat };
-        } catch {
-          // Fallback: insert as hidden text field code marker
-          const marker = `{${fieldCode}}`;
-          range.insertText(marker, Word.InsertLocation.after);
-          await ctx.sync();
-          return { success: true, shortCite, longCite, category: cat, note: "Inserted as text marker (insertField API not available)" };
         }
+
+        // Search main body
+        const bodyResults = ctx.document.body.search(anchor, { matchCase: true });
+        bodyResults.load("items");
+
+        // Search footnotes
+        const footnotes = ctx.document.body.footnotes;
+        footnotes.load("items");
+        await ctx.sync();
+
+        // Load each footnote body's search results
+        const fnSearches = footnotes.items.map(fn => {
+          const r = fn.body.search(anchor, { matchCase: true });
+          r.load("items");
+          return r;
+        });
+        await ctx.sync();
+
+        let marked = 0;
+
+        // Mark first body hit
+        if (bodyResults.items.length > 0) {
+          await insertTA(bodyResults.items[0]);
+          marked++;
+        }
+
+        // Mark first hit in each footnote
+        for (const fnSearch of fnSearches) {
+          if (fnSearch.items.length > 0) {
+            await insertTA(fnSearch.items[0]);
+            marked++;
+          }
+        }
+
+        if (marked === 0) throw new Error(`Text "${anchor}" not found in document body or footnotes`);
+        return { success: true, shortCite, longCite, category: cat, marked };
       });
 
     case "insertTableOfAuthorities":
@@ -3073,59 +3138,24 @@ function setupTrackChangesToggle(): void {
 // QUICK ACTIONS
 // ══════════════════════════════════════
 
-interface QuickAction {
+// ── Presets ──
+
+interface Preset {
   name: string;
   prompt: string;
 }
 
-interface QuickActionCategory {
-  label: string;
-  actions: QuickAction[];
-}
-
-const QUICK_ACTIONS_DEFAULTS: QuickActionCategory[] = [];
-
-function getBuiltinOverrides(): Record<string, string> {
-  try { return JSON.parse(localStorage.getItem("sidebar-builtin-overrides") || "{}"); } catch { return {}; }
-}
-function saveBuiltinOverrides(overrides: Record<string, string>): void {
-  localStorage.setItem("sidebar-builtin-overrides", JSON.stringify(overrides));
-}
-
-function getCustomPrompts(): QuickAction[] {
+function getPresets(): Preset[] {
   try { return JSON.parse(localStorage.getItem("sidebar-custom-prompts") || "[]"); } catch { return []; }
 }
-function saveCustomPrompts(prompts: QuickAction[]): void {
-  localStorage.setItem("sidebar-custom-prompts", JSON.stringify(prompts));
-  // Also sync to server (best-effort)
+
+function savePresets(presets: Preset[]): void {
+  localStorage.setItem("sidebar-custom-prompts", JSON.stringify(presets));
   fetch("http://localhost:3001/api/prompts/custom", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(prompts),
+    body: JSON.stringify(presets),
   }).catch(() => {});
-}
-
-function getEffectivePrompt(actionName: string, defaultPrompt: string): string {
-  const overrides = getBuiltinOverrides();
-  return overrides[actionName] ?? defaultPrompt;
-}
-
-function getDefaultPrompt(actionName: string): string | null {
-  for (const cat of QUICK_ACTIONS_DEFAULTS) {
-    for (const a of cat.actions) {
-      if (a.name === actionName) return a.prompt;
-    }
-  }
-  return null;
-}
-
-function isBuiltinAction(actionName: string): boolean {
-  return getDefaultPrompt(actionName) !== null;
-}
-
-function isBuiltinModified(actionName: string): boolean {
-  const overrides = getBuiltinOverrides();
-  return actionName in overrides;
 }
 
 async function resolvePromptVariables(prompt: string): Promise<string> {
@@ -3264,54 +3294,24 @@ async function executeQuickAction(prompt: string, displayLabel?: string): Promis
   if (sendBtn) sendBtn.click();
 }
 
-// ── Modal State ──
-let qaModalMode: "edit-builtin" | "edit-custom" | "add-custom" = "add-custom";
-let qaModalActionName: string | null = null;
-let qaModalCustomIndex: number = -1;
+// ── Preset Editor Modal ──
+let presetEditIndex: number = -1; // -1 = new
 
-function openPromptEditor(opts: {
-  mode: typeof qaModalMode;
-  name?: string;
-  prompt?: string;
-  defaultPrompt?: string;
-  customIndex?: number;
-}): void {
-  qaModalMode = opts.mode;
-  qaModalActionName = opts.name || null;
-  qaModalCustomIndex = opts.customIndex ?? -1;
-
+function openPresetEditor(opts: { name?: string; prompt?: string; index?: number }): void {
+  presetEditIndex = opts.index ?? -1;
   const overlay = document.getElementById("qa-modal-overlay");
   const titleEl = document.getElementById("qa-modal-title") as HTMLElement;
   const nameInput = document.getElementById("qa-modal-name") as HTMLInputElement;
   const promptInput = document.getElementById("qa-modal-prompt") as HTMLTextAreaElement;
-  const resetBtn = document.getElementById("qa-modal-reset") as HTMLButtonElement;
-
   if (!overlay) return;
-
-  if (opts.mode === "add-custom") {
-    titleEl.textContent = "New Custom Prompt";
-    nameInput.value = "";
-    promptInput.value = "";
-    nameInput.readOnly = false;
-    resetBtn.style.display = "none";
-  } else if (opts.mode === "edit-builtin") {
-    titleEl.textContent = "Edit: " + (opts.name || "");
-    nameInput.value = opts.name || "";
-    nameInput.readOnly = true;
-    promptInput.value = opts.prompt || opts.defaultPrompt || "";
-    resetBtn.style.display = isBuiltinModified(opts.name || "") ? "inline-block" : "none";
-  } else {
-    titleEl.textContent = "Edit: " + (opts.name || "");
-    nameInput.value = opts.name || "";
-    nameInput.readOnly = false;
-    promptInput.value = opts.prompt || "";
-    resetBtn.style.display = "none";
-  }
-
+  titleEl.textContent = presetEditIndex >= 0 ? "Edit Preset" : "New Preset";
+  nameInput.value = opts.name || "";
+  nameInput.readOnly = false;
+  promptInput.value = opts.prompt || "";
   overlay.classList.add("visible");
 }
 
-function closePromptEditor(): void {
+function closePresetEditor(): void {
   document.getElementById("qa-modal-overlay")?.classList.remove("visible");
 }
 
@@ -3456,254 +3456,306 @@ async function showMemoryPanel(): Promise<void> {
   }
 }
 
-function setupQuickActions(): void {
-  const bar = document.getElementById("quick-actions-bar");
-  if (!bar) return;
+// ── Standing Orders ──
 
-  function closeAllDropdowns() {
-    bar.querySelectorAll(".qa-dropdown.visible").forEach(d => d.classList.remove("visible"));
-    bar.querySelectorAll(".qa-pill.active").forEach(p => p.classList.remove("active"));
+interface StandingOrder {
+  id: string;
+  text: string;
+  enabled: boolean;
+}
+
+let ordersEditId: string | null = null; // null = new order
+
+function setupStandingOrdersPanel(): void {
+  const panel = document.getElementById("orders-panel");
+  const list = document.getElementById("orders-list");
+  const toggleBtn = document.getElementById("orders-toggle-btn");
+  const closeBtn = document.getElementById("orders-panel-close");
+  const addBtn = document.getElementById("orders-add-btn");
+  if (!panel || !list) return;
+
+  function closePanel() {
+    panel.style.display = "none";
+    toggleBtn?.classList.remove("active");
   }
 
-  function renderBar() {
-    bar.innerHTML = "";
-    const overrides = getBuiltinOverrides();
-    const customPrompts = getCustomPrompts();
+  async function renderList() {
+    list.innerHTML = "";
+    let orders: StandingOrder[] = [];
+    try {
+      const r = await fetch("http://localhost:3001/api/standing-orders");
+      const j = await r.json();
+      orders = j?.data || [];
+    } catch { /* server not up */ }
 
-    // Built-in categories
-    for (const cat of QUICK_ACTIONS_DEFAULTS) {
-      const pill = document.createElement("div");
-      pill.className = "qa-pill";
-      pill.textContent = cat.label;
-
-      const dropdown = document.createElement("div");
-      dropdown.className = "qa-dropdown";
-
-      for (const action of cat.actions) {
-        const effectivePrompt = getEffectivePrompt(action.name, action.prompt);
-        const modified = isBuiltinModified(action.name);
-
-        const row = document.createElement("div");
-        row.className = "qa-action";
-
-        const nameSpan = document.createElement("span");
-        nameSpan.className = "qa-action-name";
-        nameSpan.textContent = action.name;
-        nameSpan.addEventListener("click", (e) => {
-          e.stopPropagation();
-          closeAllDropdowns();
-          executeQuickAction(effectivePrompt, action.name);
-        });
-
-        const icons = document.createElement("span");
-        icons.className = "qa-action-icons";
-        if (modified) {
-          const dot = document.createElement("span");
-          dot.className = "qa-modified-dot";
-          dot.title = "Customized";
-          icons.appendChild(dot);
-        }
-        const editBtn = document.createElement("span");
-        editBtn.className = "qa-action-edit";
-        editBtn.textContent = "✏️";
-        editBtn.title = "Edit prompt";
-        editBtn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          closeAllDropdowns();
-          openPromptEditor({
-            mode: "edit-builtin",
-            name: action.name,
-            prompt: effectivePrompt,
-            defaultPrompt: action.prompt,
-          });
-        });
-        icons.appendChild(editBtn);
-
-        row.appendChild(nameSpan);
-        row.appendChild(icons);
-        dropdown.appendChild(row);
-      }
-
-      pill.appendChild(dropdown);
-      pill.addEventListener("click", (e) => {
-        if ((e.target as HTMLElement).closest(".qa-action")) return;
-        const wasActive = pill.classList.contains("active");
-        closeAllDropdowns();
-        if (!wasActive) {
-          pill.classList.add("active");
-          // Position dropdown using fixed positioning
-          const rect = pill.getBoundingClientRect();
-          dropdown.style.left = rect.left + "px";
-          // Try to show above the pill; if not enough room, show below
-          dropdown.classList.add("visible");
-          const ddRect = dropdown.getBoundingClientRect();
-          if (rect.top - ddRect.height > 0) {
-            dropdown.style.top = (rect.top - ddRect.height - 4) + "px";
-          } else {
-            dropdown.style.top = (rect.bottom + 4) + "px";
-          }
-        }
-      });
-      bar.appendChild(pill);
+    if (orders.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "presets-empty";
+      empty.textContent = "No standing orders. Add rules you want applied to every response.";
+      list.appendChild(empty);
+      return;
     }
 
-    // Custom category
-    const customPill = document.createElement("div");
-    customPill.className = "qa-pill";
-    customPill.textContent = "⭐ Custom";
-
-    const customDropdown = document.createElement("div");
-    customDropdown.className = "qa-dropdown";
-
-    for (let i = 0; i < customPrompts.length; i++) {
-      const cp = customPrompts[i];
+    for (const order of orders) {
       const row = document.createElement("div");
-      row.className = "qa-action";
+      row.className = "preset-row" + (order.enabled ? "" : " disabled");
 
-      const nameSpan = document.createElement("span");
-      nameSpan.className = "qa-action-name";
-      nameSpan.textContent = cp.name;
-      nameSpan.addEventListener("click", (e) => {
+      // Toggle button
+      const toggle = document.createElement("button");
+      toggle.className = "order-toggle" + (order.enabled ? " on" : "");
+      toggle.title = order.enabled ? "Enabled — click to disable" : "Disabled — click to enable";
+      toggle.addEventListener("click", async (e) => {
         e.stopPropagation();
-        closeAllDropdowns();
-        executeQuickAction(cp.prompt);
+        await fetch(`http://localhost:3001/api/standing-orders/${order.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: !order.enabled }),
+        });
+        renderList();
+      });
+
+      const name = document.createElement("span");
+      name.className = "preset-row-name";
+      name.textContent = order.text;
+      name.title = order.text;
+
+      const icons = document.createElement("span");
+      icons.className = "preset-row-icons";
+
+      const editBtn = document.createElement("span");
+      editBtn.className = "preset-icon-btn";
+      editBtn.textContent = "✏️";
+      editBtn.title = "Edit";
+      editBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openOrderEditor(order);
+      });
+
+      const delBtn = document.createElement("span");
+      delBtn.className = "preset-icon-btn del";
+      delBtn.textContent = "✕";
+      delBtn.title = "Delete";
+      delBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await fetch(`http://localhost:3001/api/standing-orders/${order.id}`, { method: "DELETE" });
+        renderList();
+      });
+
+      icons.appendChild(editBtn);
+      icons.appendChild(delBtn);
+      row.appendChild(toggle);
+      row.appendChild(name);
+      row.appendChild(icons);
+      list.appendChild(row);
+    }
+    updateOrdersBtn(orders);
+  }
+
+  function updateOrdersBtn(orders: StandingOrder[]) {
+    const active = orders.filter(o => o.enabled).length;
+    if (toggleBtn) {
+      toggleBtn.textContent = active > 0 ? `📌 Orders (${active})` : "📌 Orders";
+      (toggleBtn as HTMLButtonElement).style.opacity = active > 0 ? "1" : "";
+    }
+  }
+
+  // ── Order editor (reuses the preset modal) ──
+  function openOrderEditor(order?: StandingOrder) {
+    ordersEditId = order?.id || null;
+    const overlay = document.getElementById("orders-modal-overlay");
+    const titleEl = document.getElementById("orders-modal-title") as HTMLElement;
+    const textEl = document.getElementById("orders-modal-text") as HTMLTextAreaElement;
+    if (!overlay) return;
+    titleEl.textContent = order ? "Edit Standing Order" : "New Standing Order";
+    textEl.value = order?.text || "";
+    overlay.classList.add("visible");
+  }
+
+  function closeOrderEditor() {
+    document.getElementById("orders-modal-overlay")?.classList.remove("visible");
+  }
+
+  // Wire modal buttons
+  document.getElementById("orders-modal-cancel")?.addEventListener("click", closeOrderEditor);
+  document.getElementById("orders-modal-overlay")?.addEventListener("click", (e) => {
+    if (e.target === document.getElementById("orders-modal-overlay")) closeOrderEditor();
+  });
+  document.getElementById("orders-modal-save")?.addEventListener("click", async () => {
+    const text = (document.getElementById("orders-modal-text") as HTMLTextAreaElement)?.value.trim();
+    if (!text) return;
+    if (ordersEditId) {
+      await fetch(`http://localhost:3001/api/standing-orders/${ordersEditId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+    } else {
+      await fetch("http://localhost:3001/api/standing-orders/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+    }
+    closeOrderEditor();
+    renderList();
+  });
+
+  // Toggle button
+  toggleBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const isOpen = panel.style.display !== "none";
+    if (isOpen) {
+      closePanel();
+    } else {
+      renderList();
+      panel.style.display = "flex";
+      toggleBtn.classList.add("active");
+    }
+  });
+
+  closeBtn?.addEventListener("click", closePanel);
+  addBtn?.addEventListener("click", () => openOrderEditor());
+
+  // Close when clicking outside
+  document.addEventListener("click", (e) => {
+    if (panel.style.display !== "none" &&
+        !(e.target as HTMLElement).closest("#orders-panel") &&
+        !(e.target as HTMLElement).closest("#orders-toggle-btn")) {
+      closePanel();
+    }
+  });
+
+  // Init — update button count
+  fetch("http://localhost:3001/api/standing-orders").then(r => r.json()).then(j => {
+    if (j?.ok) updateOrdersBtn(j.data || []);
+  }).catch(() => {});
+}
+
+function setupPresetsPanel(): void {
+  const panel = document.getElementById("presets-panel");
+  const list = document.getElementById("presets-list");
+  const toggleBtn = document.getElementById("presets-toggle-btn");
+  const closeBtn = document.getElementById("presets-panel-close");
+  const addBtn = document.getElementById("presets-add-btn");
+  if (!panel || !list) return;
+
+  function closePanel() {
+    panel.style.display = "none";
+    toggleBtn?.classList.remove("active");
+  }
+
+  function renderList() {
+    list.innerHTML = "";
+    const presets = getPresets();
+    if (presets.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "presets-empty";
+      empty.textContent = "No presets yet. Add one below.";
+      list.appendChild(empty);
+      return;
+    }
+    presets.forEach((p, i) => {
+      const row = document.createElement("div");
+      row.className = "preset-row";
+
+      const name = document.createElement("span");
+      name.className = "preset-row-name";
+      name.textContent = p.name;
+      name.title = p.prompt;
+      name.addEventListener("click", () => {
+        closePanel();
+        executeQuickAction(p.prompt, p.name);
       });
 
       const icons = document.createElement("span");
-      icons.className = "qa-action-icons";
+      icons.className = "preset-row-icons";
+
       const editBtn = document.createElement("span");
-      editBtn.className = "qa-action-edit";
+      editBtn.className = "preset-icon-btn";
       editBtn.textContent = "✏️";
+      editBtn.title = "Edit";
       editBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        closeAllDropdowns();
-        openPromptEditor({ mode: "edit-custom", name: cp.name, prompt: cp.prompt, customIndex: i });
+        openPresetEditor({ name: p.name, prompt: p.prompt, index: i });
       });
+
       const delBtn = document.createElement("span");
-      delBtn.className = "qa-action-delete";
+      delBtn.className = "preset-icon-btn del";
       delBtn.textContent = "✕";
       delBtn.title = "Delete";
       delBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        const prompts = getCustomPrompts();
-        prompts.splice(i, 1);
-        saveCustomPrompts(prompts);
-        renderBar();
+        const presets = getPresets();
+        presets.splice(i, 1);
+        savePresets(presets);
+        renderList();
       });
+
       icons.appendChild(editBtn);
       icons.appendChild(delBtn);
-
-      row.appendChild(nameSpan);
+      row.appendChild(name);
       row.appendChild(icons);
-      customDropdown.appendChild(row);
-    }
-
-    // Add custom prompt button
-    const addRow = document.createElement("div");
-    addRow.className = "qa-add-custom";
-    if (customPrompts.length > 0) addRow.classList.add("qa-custom-actions");
-    addRow.textContent = "+ Add Custom Prompt";
-    addRow.addEventListener("click", (e) => {
-      e.stopPropagation();
-      closeAllDropdowns();
-      openPromptEditor({ mode: "add-custom" });
+      list.appendChild(row);
     });
-    customDropdown.appendChild(addRow);
-
-    customPill.appendChild(customDropdown);
-    customPill.addEventListener("click", (e) => {
-      if ((e.target as HTMLElement).closest(".qa-action, .qa-add-custom")) return;
-      const wasActive = customPill.classList.contains("active");
-      closeAllDropdowns();
-      if (!wasActive) {
-        customPill.classList.add("active");
-        const rect = customPill.getBoundingClientRect();
-        customDropdown.style.left = rect.left + "px";
-        customDropdown.classList.add("visible");
-        const ddRect = customDropdown.getBoundingClientRect();
-        if (rect.top - ddRect.height > 0) {
-          customDropdown.style.top = (rect.top - ddRect.height - 4) + "px";
-        } else {
-          customDropdown.style.top = (rect.bottom + 4) + "px";
-        }
-      }
-    });
-    bar.appendChild(customPill);
   }
 
-  // Close dropdowns when clicking outside
+  // Toggle button opens/closes panel
+  toggleBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const isOpen = panel.style.display !== "none";
+    if (isOpen) {
+      closePanel();
+    } else {
+      renderList();
+      panel.style.display = "flex";
+      toggleBtn.classList.add("active");
+    }
+  });
+
+  closeBtn?.addEventListener("click", closePanel);
+  addBtn?.addEventListener("click", () => openPresetEditor({}));
+
+  // Close panel when clicking outside
   document.addEventListener("click", (e) => {
-    if (!(e.target as HTMLElement).closest(".qa-pill")) {
-      closeAllDropdowns();
+    if (panel.style.display !== "none" &&
+        !(e.target as HTMLElement).closest("#presets-panel") &&
+        !(e.target as HTMLElement).closest("#presets-toggle-btn")) {
+      closePanel();
     }
   });
 
-  // Modal handlers
-  document.getElementById("qa-modal-cancel")?.addEventListener("click", closePromptEditor);
+  // Modal save handler
+  document.getElementById("qa-modal-cancel")?.addEventListener("click", closePresetEditor);
   document.getElementById("qa-modal-overlay")?.addEventListener("click", (e) => {
-    if (e.target === document.getElementById("qa-modal-overlay")) closePromptEditor();
+    if (e.target === document.getElementById("qa-modal-overlay")) closePresetEditor();
   });
-
-  document.getElementById("qa-modal-reset")?.addEventListener("click", () => {
-    if (qaModalMode === "edit-builtin" && qaModalActionName) {
-      const overrides = getBuiltinOverrides();
-      delete overrides[qaModalActionName];
-      saveBuiltinOverrides(overrides);
-      closePromptEditor();
-      renderBar();
-    }
-  });
-
   document.getElementById("qa-modal-save")?.addEventListener("click", () => {
     const nameInput = document.getElementById("qa-modal-name") as HTMLInputElement;
     const promptInput = document.getElementById("qa-modal-prompt") as HTMLTextAreaElement;
     const name = nameInput.value.trim();
     const prompt = promptInput.value.trim();
     if (!name || !prompt) return;
-
-    if (qaModalMode === "edit-builtin" && qaModalActionName) {
-      const defaultPrompt = getDefaultPrompt(qaModalActionName);
-      const overrides = getBuiltinOverrides();
-      if (prompt === defaultPrompt) {
-        delete overrides[qaModalActionName];
-      } else {
-        overrides[qaModalActionName] = prompt;
-      }
-      saveBuiltinOverrides(overrides);
-    } else if (qaModalMode === "edit-custom" && qaModalCustomIndex >= 0) {
-      const prompts = getCustomPrompts();
-      if (qaModalCustomIndex < prompts.length) {
-        prompts[qaModalCustomIndex] = { name, prompt };
-        saveCustomPrompts(prompts);
-      }
-    } else if (qaModalMode === "add-custom") {
-      const prompts = getCustomPrompts();
-      prompts.push({ name, prompt });
-      saveCustomPrompts(prompts);
+    const presets = getPresets();
+    if (presetEditIndex >= 0 && presetEditIndex < presets.length) {
+      presets[presetEditIndex] = { name, prompt };
+    } else {
+      presets.push({ name, prompt });
     }
-
-    closePromptEditor();
-    renderBar();
+    savePresets(presets);
+    closePresetEditor();
+    renderList();
   });
 
-  // Load custom prompts from server as backup (merge missing ones)
+  // Sync from server on init (merge any server-saved presets missing from localStorage)
   fetch("http://localhost:3001/api/prompts/custom").then(r => r.json()).then(j => {
     if (j?.ok && Array.isArray(j.data) && j.data.length > 0) {
-      const local = getCustomPrompts();
-      const localNames = new Set(local.map(p => p.name));
+      const local = getPresets();
+      const localNames = new Set(local.map((p: Preset) => p.name));
       let added = false;
       for (const sp of j.data) {
-        if (!localNames.has(sp.name)) {
-          local.push(sp);
-          added = true;
-        }
+        if (!localNames.has(sp.name)) { local.push(sp); added = true; }
       }
-      if (added) {
-        localStorage.setItem("sidebar-custom-prompts", JSON.stringify(local));
-        renderBar();
-      }
+      if (added) savePresets(local);
     }
   }).catch(() => {});
-
-  renderBar();
 }
